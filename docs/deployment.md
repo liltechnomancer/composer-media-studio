@@ -12,6 +12,7 @@
 | Workers AI | binding `AI` |
 | Cron | `* * * * *` for job reconciliation |
 | Runtime secrets | `OWNER_PASSPHRASE`, `SESSION_SECRET`, `FAL_KEY` |
+| Optional public destinations | `PUBLIC_BUILD_URL`, `PUBLIC_STORY_URL`, `LAUNCH_KIT_URL` |
 | Source | https://github.com/loftwah/composer-media-studio |
 
 Secrets live only on the Worker and in the owner's ignored local file. The
@@ -33,6 +34,23 @@ pnpm deploy --migrate
 `pnpm deploy` refuses a dirty tree or unpushed `main`, runs the focused checks
 once, deploys with the commit baked in, then reads `/healthz` and `/build.json`
 and fails if the live revision is not the released commit.
+
+## Optional public destinations
+
+A published page can offer an owner-configured next step. All three variables
+are optional and independent installations may omit every one; the page still
+shows its media, download and a secondary **Owner sign-in** link.
+
+| Variable | Destination |
+| --- | --- |
+| `PUBLIC_BUILD_URL` | **Build your own Media Studio** |
+| `PUBLIC_STORY_URL` | **See how this was made** |
+| `LAUNCH_KIT_URL` | **Open Launch Kit** in the owner's media detail view |
+
+Set them as ordinary Worker variables, not secrets. Only plain HTTPS URLs
+without credentials are accepted; an invalid value is ignored rather than
+rendered. No destination is fetched at runtime and no link creates a Composer,
+Launch Kit or provider dependency.
 
 ## Agent handoff from Composer
 

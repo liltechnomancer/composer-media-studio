@@ -6,7 +6,43 @@ const mark = `<svg viewBox="0 0 48 48" aria-hidden="true" focusable="false"><rec
 
 const styles = "/studio.css";
 
-function head({ title, description, image, url, kind = "website", extra = "" }) {
+function head({
+  title,
+  description,
+  image,
+  imageAlt,
+  imageType,
+  imageWidth,
+  imageHeight,
+  url,
+  kind = "website",
+  extra = "",
+}) {
+  const hasImage = Boolean(image);
+  const width = Number.isInteger(imageWidth) && imageWidth > 0 ? imageWidth : null;
+  const height = Number.isInteger(imageHeight) && imageHeight > 0 ? imageHeight : null;
+  const type = typeof imageType === "string" && imageType.startsWith("image/") ? imageType : null;
+  const alt = imageAlt || title;
+  const imageTags = hasImage
+    ? [
+        `<meta property="og:image" content="${escapeHtml(image)}">`,
+        type ? `<meta property="og:image:type" content="${escapeHtml(type)}">` : "",
+        width ? `<meta property="og:image:width" content="${width}">` : "",
+        height ? `<meta property="og:image:height" content="${height}">` : "",
+        `<meta property="og:image:alt" content="${escapeHtml(alt)}">`,
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : "";
+  const twitter = [
+    `<meta name="twitter:card" content="${hasImage ? "summary_large_image" : "summary"}">`,
+    `<meta name="twitter:title" content="${escapeHtml(title)}">`,
+    `<meta name="twitter:description" content="${escapeHtml(description)}">`,
+    hasImage ? `<meta name="twitter:image" content="${escapeHtml(image)}">` : "",
+    hasImage ? `<meta name="twitter:image:alt" content="${escapeHtml(alt)}">` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -17,12 +53,12 @@ function head({ title, description, image, url, kind = "website", extra = "" }) 
 <meta name="theme-color" content="#f4f0e8">
 <link rel="icon" href="/mark.svg" type="image/svg+xml">
 <link rel="stylesheet" href="${styles}">
-${image ? `<meta property="og:image" content="${escapeHtml(image)}">` : ""}
+${imageTags}
 <meta property="og:type" content="${kind}">
 <meta property="og:title" content="${escapeHtml(title)}">
 <meta property="og:description" content="${escapeHtml(description)}">
 ${url ? `<meta property="og:url" content="${escapeHtml(url)}"><link rel="canonical" href="${escapeHtml(url)}">` : ""}
-<meta name="twitter:card" content="${image ? "summary_large_image" : "summary"}">
+${twitter}
 ${extra}
 </head>`;
 }
@@ -110,25 +146,49 @@ export function publicPage({
   media,
   download,
   poster,
+  posterMime,
+  posterWidth,
+  posterHeight,
+  buildUrl,
+  storyUrl,
   origin,
   slug,
 }) {
   const url = `${origin}/p/${slug}`;
   const isVideo = kind === "video";
-  const dimensions =
-    width && height ? `${width} × ${height}` : null;
+  const dimensions = width && height ? `${width} × ${height}` : null;
   const duration = durationMs ? `${(durationMs / 1000).toFixed(1)}s` : null;
   const size = bytes ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : null;
   const facts = [dimensions, duration, size, mime].filter(Boolean).join(" · ");
+  const ogImage = isVideo ? poster : media;
+  const ogImageUrl = ogImage ? `${origin}${ogImage}` : null;
+  const ogImageMime = isVideo ? posterMime : mime;
+  const ogImageWidth = isVideo ? posterWidth : width;
+  const ogImageHeight = isVideo ? posterHeight : height;
+  const actions = [
+    buildUrl
+      ? `<a class="button" href="${escapeHtml(buildUrl)}">Build your own Media Studio</a>`
+      : "",
+    storyUrl
+      ? `<a class="button secondary" href="${escapeHtml(storyUrl)}">See how this was made</a>`
+      : "",
+  ].filter(Boolean);
+  const nextCopy = buildUrl
+    ? "Take the same kind of studio into your own Cloudflare account, with your own media storage and model keys."
+    : "The project, references and decisions behind this published piece.";
   return `${head({
     title,
     description: description || "Published from an independent Media Studio.",
-    image: poster ? `${origin}${poster}` : !isVideo ? `${origin}${media}` : undefined,
+    image: ogImageUrl,
+    imageAlt: title,
+    imageType: ogImageMime,
+    imageWidth: ogImageWidth,
+    imageHeight: ogImageHeight,
     url,
     kind: isVideo ? "video.other" : "website",
     extra: isVideo
       ? `<meta property="og:video" content="${escapeHtml(origin + media)}"><meta property="og:video:type" content="${escapeHtml(mime)}">${durationMs ? `<meta property="video:duration" content="${Math.round(durationMs / 1000)}">` : ""}`
-      : `<meta property="og:image:alt" content="${escapeHtml(title)}">`,
+      : "",
   })}
 <body>
 <main class="public-page" id="main">
@@ -149,7 +209,17 @@ export function publicPage({
     </figcaption>
   </figure>
   <p class="small">A deliberately published piece. Private projects, other media and prompts stay in the studio. Withdrawing this page stops new visits here; copies someone already downloaded cannot be recalled.</p>
-  <footer class="public-footer">Published with an independently owned Media Studio · <a href="${escapeHtml(origin)}/">visit the studio</a></footer>
+  ${
+    actions.length
+      ? `<section class="public-next" aria-labelledby="public-next-title">
+    <p class="eyebrow">${buildUrl ? "Make your own" : "Behind this page"}</p>
+    <h2 id="public-next-title">${buildUrl ? "Build your own Media Studio" : "How this was made"}</h2>
+    <p>${nextCopy}</p>
+    <div class="row">${actions.join("")}</div>
+  </section>`
+      : ""
+  }
+  <footer class="public-footer">Published with an independently owned Media Studio · <a href="${escapeHtml(origin)}/">Owner sign-in</a></footer>
 </main>
 </body>
 </html>`;

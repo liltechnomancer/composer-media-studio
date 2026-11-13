@@ -30,6 +30,8 @@ pnpm dev
 
 Optional video on a local or deployed studio: `npx wrangler secret put FAL_KEY`.
 
+Optional public destinations: `PUBLIC_BUILD_URL` ("Build your own Media Studio"), `PUBLIC_STORY_URL` ("See how this was made") and `LAUNCH_KIT_URL` ("Open Launch Kit"). Each is a plain HTTPS installation variable; omit an independent studio's absent destination and the link is not rendered. Invalid, non-HTTPS or credential-bearing values are ignored.
+
 `pnpm check` runs the focused unit and persistence tests. `pnpm deploy` refuses a dirty tree or unpushed main, runs the checks once, deploys, and verifies the live revision.
 
 ## Ownership boundaries

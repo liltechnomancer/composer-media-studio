@@ -13,6 +13,7 @@ const state = {
   models: [],
   recipes: [],
   videosConfigured: false,
+  destinations: {},
   filter: "all",
   query: "",
   create: null,
@@ -74,6 +75,12 @@ function dateLabel(timestamp) {
   return new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" }).format(new Date(timestamp));
 }
 
+function stillExtension(mime) {
+  if (mime === "image/png") return "png";
+  if (mime === "image/webp") return "webp";
+  return "jpg";
+}
+
 function timeLabel(timestamp) {
   if (!timestamp) return "";
   return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(timestamp));
@@ -118,6 +125,7 @@ async function boot() {
   state.models = data.models;
   state.recipes = data.recipes;
   state.videosConfigured = data.videosConfigured;
+  state.destinations = data.destinations ?? {};
   const route = parseHash();
   state.view = route.view;
   state.projectId = route.projectId ?? null;
@@ -493,6 +501,28 @@ function assetView() {
   const asset = state.project?.assets.find((item) => item.id === state.assetId);
   if (!asset) return `<p class="notice">That asset is no longer in the library. <a href="#/p/${esc(state.projectId)}/library">Back to the library</a>.</p>`;
   const isVideo = asset.kind === "video";
+  // The server resolves this from stored same-project relationships; the client
+  // never guesses a poster from a filename or title.
+  const still = asset.reuseStillId ? state.project.assets.find((item) => item.id === asset.reuseStillId) : null;
+  const launchKitUrl = state.destinations?.launchKitUrl ?? null;
+  const launchKitSource = still
+    ? `<div class="stack" style="border-top:1px solid var(--line);padding-top:0.8rem">
+        <p class="eyebrow" style="margin:0">Launch Kit source</p>
+        <div class="row">
+          <a class="button secondary" href="${esc(still.download)}" download="launch-kit-source-${esc(still.id)}.${esc(stillExtension(still.mime))}">${isVideo ? "Download poster for Launch Kit" : "Download for Launch Kit"}</a>
+          ${launchKitUrl ? `<a class="button secondary" href="${esc(launchKitUrl)}" target="_blank" rel="noopener noreferrer">Open Launch Kit</a>` : ""}
+        </div>
+        <p class="small" style="margin:0">${
+          isVideo
+            ? `1. Download the poster still${still.title ? ` “${esc(still.title)}”` : ""}. 2. Import that still into Launch Kit. The clip stays here; only the still becomes the source artwork.`
+            : "1. Download the still. 2. Import it into Launch Kit as the source artwork. Finishing and export stay in Launch Kit."
+        }${launchKitUrl ? "" : " Open your own Launch Kit installation to import it."}</p>
+      </div>`
+    : `<p class="notice" style="font-size:0.84rem">${
+        isVideo
+          ? "This clip has no retained poster or source still, so it cannot supply Launch Kit artwork or a variation reference. Choose a still in the library instead."
+          : "This file type cannot be imported into Launch Kit or used as a variation reference. Upload a JPEG, PNG or WebP still."
+      }${isVideo ? ` <button class="quiet" data-action="choose-still">Choose a still</button>` : ""}</p>`;
   return `
     <p class="small"><a href="#/p/${esc(state.projectId)}/library">← Back to ${esc(state.project.name)}</a></p>
     <div class="viewer">
@@ -511,14 +541,14 @@ function assetView() {
         <div class="row">
           <a class="button secondary" href="${esc(asset.download)}" download>Download</a>
           <button class="secondary" data-action="rename-asset" data-id="${esc(asset.id)}">Rename</button>
-          <button class="secondary" data-action="vary-asset" data-id="${esc(asset.id)}">Make a variation</button>
+          ${still ? `<button class="secondary" data-action="vary-asset" data-id="${esc(still.id)}">${isVideo ? "Make a variation of its still" : "Make a variation"}</button>` : ""}
         </div>
         <div class="row">
           <button class="secondary" data-action="animate-asset" data-id="${esc(asset.id)}" ${isVideo ? "disabled" : ""}>Animate this still</button>
           <button class="secondary" data-action="publish-asset" data-id="${esc(asset.id)}">Publish page</button>
         </div>
-        <div class="row"><a class="button secondary" href="${esc(asset.file)}" download="launch-kit-source-${esc(asset.id)}.${esc(asset.mime.split("/")[1])}">Use in Launch Kit</a></div>
-        <p class="small">Launch Kit takes the still as its source artwork; download it here, then import it in the Launch Kit editor. Finishing stays in Launch Kit.</p>
+        ${launchKitSource}
+        ${isVideo && still ? `<p class="small" style="margin:0">A variation uses “${esc(still.title)}”, the still, not this clip.</p>` : ""}
         <button class="quiet" data-action="delete-asset" data-id="${esc(asset.id)}">Delete from library</button>
       </aside>
     </div>`;
@@ -700,14 +730,19 @@ async function handleAction(action, element) {
       return;
     }
     case "vary-asset": {
+      const source = state.project.assets.find((item) => item.id === id);
+      if (!source || source.kind !== "image") {
+        notify("A variation needs a still reference.", "bad");
+        return;
+      }
       state.create = {
         ...defaultCreate(),
         kind: "image",
         model: "studio-detail",
         aspect: "square",
         recipeSlug: "reference-variation",
-        referenceAssetId: id,
-        parentAssetId: id,
+        referenceAssetId: source.id,
+        parentAssetId: source.id,
         controls: {},
       };
       const recipe = recipeBySlug("reference-variation");
@@ -718,12 +753,17 @@ async function handleAction(action, element) {
       return;
     }
     case "animate-asset": {
+      const source = state.project.assets.find((item) => item.id === id);
+      if (!source || source.kind !== "image") {
+        notify("Choose a still to animate.", "bad");
+        return;
+      }
       state.create = {
         ...defaultCreate(),
         kind: "video",
         model: state.project.defaults.videoModel ?? "hailuo-standard",
         recipeSlug: "animate-a-still",
-        referenceAssetId: id,
+        referenceAssetId: source.id,
         durationSeconds: 6,
         controls: { motion: "slow push in" },
       };
@@ -734,6 +774,12 @@ async function handleAction(action, element) {
       render();
       return;
     }
+    case "choose-still":
+      state.filter = "image";
+      state.query = "";
+      state.tab = "library";
+      location.hash = `#/p/${state.projectId}/library`;
+      return;
     case "publish-asset":
       await publishAsset(id);
       return;

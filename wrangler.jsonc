@@ -40,7 +40,10 @@
   },
   "vars": {
     "PUBLIC_ORIGIN": "https://media.loftwah.com",
-    "MONTHLY_ALLOWANCE_MICRO": "5000000"
+    "MONTHLY_ALLOWANCE_MICRO": "5000000",
+    "PUBLIC_BUILD_URL": "https://composer.loftwah.com/init?start=media-studio",
+    "LAUNCH_KIT_URL": "https://composer-launch-kit.loftwah.workers.dev/"
+    // PUBLIC_STORY_URL stays unset until the public /media-studio route is live.
   },
   "triggers": {
     "crons": ["* * * * *"]

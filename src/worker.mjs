@@ -15,6 +15,7 @@ import {
 } from "./lib/jobs.mjs";
 import { publicModels } from "./lib/providers.mjs";
 import { builtinRecipe, projectRecipes, renderPrompt, builtinRecipes } from "./lib/recipes.mjs";
+import { reuseStillFor, sharingDestinations } from "./lib/sharing.mjs";
 import { shell, loginPage, publicPage, notFoundPage, helpPage } from "./lib/ui.mjs";
 import {
   escapeHtml,
@@ -81,7 +82,7 @@ async function body(request, limit = 64 * 1024) {
   }
 }
 
-function assetView(asset) {
+function assetView(asset, extra = {}) {
   return {
     id: asset.id,
     kind: asset.kind,
@@ -99,6 +100,7 @@ function assetView(asset) {
     createdAt: asset.created_at,
     file: `/api/assets/${asset.id}/file`,
     download: `/api/assets/${asset.id}/download`,
+    ...extra,
   };
 }
 
@@ -205,6 +207,7 @@ async function handleApi(request, env, url) {
       videosConfigured: Boolean(env.FAL_KEY),
       allowanceDefaultMicro: Number(env.MONTHLY_ALLOWANCE_MICRO) || 5_000_000,
       recipes: builtinRecipes,
+      destinations: sharingDestinations(env),
     });
   }
 
@@ -242,9 +245,36 @@ async function handleApi(request, env, url) {
       const publications = await env.DB.prepare("SELECT * FROM publications WHERE project_id=?1 AND revoked_at IS NULL ORDER BY created_at DESC")
         .bind(project.id)
         .all();
+      // Reuse resolves from stored relationships and the same-project library.
+      // The history list above is bounded for display; read every generation's
+      // reference so an older clip can still find its retained still.
+      const reuseRows = await env.DB.prepare(
+        "SELECT id,output_asset_id,request_json FROM generations WHERE project_id=?1",
+      )
+        .bind(project.id)
+        .all();
+      const generationReferences = reuseRows.results.map((row) => ({
+        id: row.id,
+        assetId: row.output_asset_id,
+        referenceAssetId: safeJson(row.request_json, {}).referenceAssetId ?? null,
+      }));
+      const assetRows = assets.results;
+      const reuseById = new Map(
+        assetRows.map((asset) => [
+          asset.id,
+          reuseStillFor({
+            asset,
+            assets: assetRows,
+            generations: generationReferences,
+            publications: publications.results,
+          }),
+        ]),
+      );
       return json({
         project: await projectSummary(env, project),
-        assets: assets.results.map(assetView),
+        assets: assetRows.map((asset) =>
+          assetView(asset, { reuseStillId: reuseById.get(asset.id)?.id ?? null }),
+        ),
         generations: generations.results.map((generation) => generationView(generation)),
         recipes: projectRecipes(project.id, recipes.results),
         publications: publications.results.map((publication) => ({
@@ -659,11 +689,22 @@ async function handlePublic(request, env, url) {
     if (request.method !== "GET" && request.method !== "HEAD")
       throw new HttpError(405, "Method not allowed", "method_not_allowed");
 
-    const poster = publication.poster_asset_id
-      ? `/p/${publication.slug}/poster`
-      : publication.asset_kind === "image"
+    let posterAsset = null;
+    if (publication.poster_asset_id) {
+      posterAsset = await env.DB.prepare(
+        "SELECT id,kind,mime,width,height,deleted_at FROM assets WHERE id=?1",
+      )
+        .bind(publication.poster_asset_id)
+        .first();
+    }
+    const usablePoster = posterAsset && !posterAsset.deleted_at && posterAsset.kind === "image" ? posterAsset : null;
+    const poster =
+      publication.asset_kind === "image"
         ? `/p/${publication.slug}/download`
-        : null;
+        : usablePoster
+          ? `/p/${publication.slug}/poster`
+          : null;
+    const destinations = sharingDestinations(env);
     const html = publicPage({
       title: publication.title,
       description: publication.description,
@@ -676,6 +717,11 @@ async function handlePublic(request, env, url) {
       media: `/p/${publication.slug}/media`,
       download: `/p/${publication.slug}/download`,
       poster,
+      posterMime: usablePoster?.mime ?? null,
+      posterWidth: usablePoster?.width ?? null,
+      posterHeight: usablePoster?.height ?? null,
+      buildUrl: destinations.buildUrl,
+      storyUrl: destinations.storyUrl,
       origin: env.PUBLIC_ORIGIN || url.origin,
       slug: publication.slug,
     });
