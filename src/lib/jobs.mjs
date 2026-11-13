@@ -15,13 +15,12 @@ import {
   getModel,
   readAudioResult,
   readRenderResult,
+  orderShotsForSocial,
   readVideoResult,
   readVideoStatus,
   runImage,
   submitAssembly,
   submitAudio,
-  submitSocialAudio,
-  submitSocialReframe,
   submitVideo,
   validateSettings,
   cancelVideo,
@@ -528,30 +527,10 @@ async function completeJob(env, generation, status) {
 
   let result;
   try {
-    if (model.render === "social" && Number(request.renderStep ?? 1) === 1) {
-      const reframed = await readRenderResult(env, providerGeneration);
-      const master = await loadAssetRow(env, generation.project_id, request.masterAssetId);
-      if (!master) throw new HttpError(409, "The assembled master is no longer available", "master_unavailable");
-      const masterUrl = await signRenderLink(env, {
-        assetId: master.id,
-        projectId: generation.project_id,
-      });
-      const second = await submitSocialAudio(env, model, reframed.url, masterUrl);
-      await env.DB.prepare(
-        "UPDATE generations SET status='submitted',provider_request_id=?2,provider_status_url=?3,provider_response_url=?4,request_json=?5,submitted_at=?6,updated_at=?6 WHERE id=?1",
-      )
-        .bind(
-          generation.id,
-          second.requestId,
-          second.statusUrl,
-          second.responseUrl,
-          JSON.stringify({ ...request, renderStep: 2 }),
-          now(),
-        )
-        .run();
-      return loadGeneration(env, generation.id);
-    }
-    result = model.kind === "audio" ? await readAudioResult(env, providerGeneration) : await readRenderResult(env, providerGeneration);
+    result =
+      model.kind === "audio"
+        ? await readAudioResult(env, providerGeneration)
+        : await readRenderResult(env, providerGeneration);
   } catch (error) {
     await env.DB.prepare("UPDATE generations SET error_code='result_unavailable',error_detail=?2,updated_at=?3 WHERE id=?1")
       .bind(generation.id, String(error.message).slice(0, 200), now())
@@ -738,11 +717,17 @@ export async function createRender(env, project, composition, input) {
 
   const spec = safeJson(composition.spec_json, { shots: [], audioAssetId: null, totalMs: 0 });
   if (model.render === "social") {
-    const masterAssetId = String(input.masterAssetId ?? "");
-    const master = await loadAssetRow(env, project.id, masterAssetId);
-    if (!master || master.kind !== "video" || master.source !== "assembled")
-      throw new HttpError(400, "Choose an assembled result to make a social cut", "invalid_master");
-    spec.masterAssetId = master.id;
+    const portrait = [];
+    for (const shot of spec.shots ?? []) {
+      const asset = await loadAssetRow(env, project.id, shot.assetId);
+      if (asset && Number(asset.height) > Number(asset.width)) portrait.push(shot.assetId);
+    }
+    if (!portrait.length)
+      throw new HttpError(
+        400,
+        "A 9:16 cut needs at least one portrait take in this storyboard",
+        "no_portrait_shot",
+      );
   }
 
   const cost = model.costMicro;
@@ -766,7 +751,6 @@ export async function createRender(env, project, composition, input) {
           shots: spec.shots,
           audioAssetId: spec.audioAssetId ?? null,
           totalMs: spec.totalMs,
-          masterAssetId: spec.masterAssetId ?? null,
           variant: model.render,
           renderStep: 1,
         }),
@@ -808,46 +792,44 @@ export async function dispatchRender(env, generation) {
   }
 
   try {
-    let submitted;
-    if (model.render === "social") {
-      const master = await loadAssetRow(env, generation.project_id, request.masterAssetId);
-      if (!master) throw new HttpError(409, "The assembled master is no longer available", "master_unavailable");
-      const masterUrl = await signRenderLink(env, {
-        assetId: master.id,
-        projectId: generation.project_id,
+    const shots = [];
+    for (const shot of request.shots ?? []) {
+      const asset = await loadAssetRow(env, generation.project_id, shot.assetId);
+      if (!asset) throw new HttpError(409, "A selected shot is no longer in this project", "shot_unavailable");
+      shots.push({
+        assetId: asset.id,
+        durationMs: Number(shot.durationMs),
+        portrait: Number(asset.height) > Number(asset.width),
       });
-      submitted = await submitSocialReframe(env, model, masterUrl);
-    } else {
-      const keyframes = [];
-      let cursor = 0;
-      for (const shot of request.shots ?? []) {
-        const asset = await loadAssetRow(env, generation.project_id, shot.assetId);
-        if (!asset) throw new HttpError(409, "A selected shot is no longer in this project", "shot_unavailable");
-        keyframes.push({
-          timestamp: cursor,
-          duration: Number(shot.durationMs),
-          url: await signRenderLink(env, { assetId: asset.id, projectId: generation.project_id }),
-        });
-        cursor += Number(shot.durationMs);
-      }
-      const tracks = [{ id: "visual", type: "video", keyframes }];
-      if (request.audioAssetId) {
-        const audio = await loadAssetRow(env, generation.project_id, request.audioAssetId);
-        if (!audio) throw new HttpError(409, "The selected audio is no longer in this project", "audio_unavailable");
-        tracks.push({
-          id: "audio",
-          type: "audio",
-          keyframes: [
-            {
-              timestamp: 0,
-              duration: cursor,
-              url: await signRenderLink(env, { assetId: audio.id, projectId: generation.project_id }),
-            },
-          ],
-        });
-      }
-      submitted = await submitAssembly(env, model, tracks);
     }
+    const ordered = model.render === "social" ? orderShotsForSocial(shots) : shots;
+    const keyframes = [];
+    let cursor = 0;
+    for (const shot of ordered) {
+      keyframes.push({
+        timestamp: cursor,
+        duration: shot.durationMs,
+        url: await signRenderLink(env, { assetId: shot.assetId, projectId: generation.project_id }),
+      });
+      cursor += shot.durationMs;
+    }
+    const tracks = [{ id: "visual", type: "video", keyframes }];
+    if (request.audioAssetId) {
+      const audio = await loadAssetRow(env, generation.project_id, request.audioAssetId);
+      if (!audio) throw new HttpError(409, "The selected audio is no longer in this project", "audio_unavailable");
+      tracks.push({
+        id: "audio",
+        type: "audio",
+        keyframes: [
+          {
+            timestamp: 0,
+            duration: cursor,
+            url: await signRenderLink(env, { assetId: audio.id, projectId: generation.project_id }),
+          },
+        ],
+      });
+    }
+    const submitted = await submitAssembly(env, model, tracks);
     await env.DB.prepare(
       "UPDATE generations SET status='submitted',provider_request_id=?2,provider_status_url=?3,provider_response_url=?4,submitted_at=?5,updated_at=?5 WHERE id=?1 AND status='submitting'",
     )

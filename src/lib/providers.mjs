@@ -155,16 +155,16 @@ export const models = {
     id: "studio-social",
     label: "Studio Social Cut",
     provider: PROVIDER_FAL,
-    endpoint: "fal-ai/ffmpeg-api/merge-videos",
+    endpoint: "fal-ai/ffmpeg-api/compose",
     kind: "video",
     render: "social",
     description:
-      "Re-frame an assembled result to a 9:16 social format and keep its audio track.",
+      "A 9:16 cut of the same takes and audio bed, assembled with the portrait takes first so the frame is vertical.",
     aspects: ["social"],
     references: 0,
     costMicro: 20_000,
     costBasis:
-      "fal.ai estimate for one bounded ffmpeg merge and audio mux; confirm current fal pricing before relying on it.",
+      "fal.ai shows ffmpeg compose at about US$0.0002 per output second; this flat figure is an estimate, not an invoice.",
   },
 };
 
@@ -505,20 +505,10 @@ export async function submitAssembly(env, model, tracks) {
   return falSubmit(env, model.endpoint, { tracks });
 }
 
-/** Re-frame the assembled master to 9:16, then keep its audio. Two bounded
- * provider steps in one durable job; the second never runs without the first. */
-export async function submitSocialReframe(env, model, masterUrl) {
-  return falSubmit(env, model.endpoint, {
-    video_urls: [masterUrl],
-    resolution: "portrait_16_9",
-  });
-}
-
-export async function submitSocialAudio(env, model, videoUrl, audioUrl) {
-  return falSubmit(env, "fal-ai/ffmpeg-api/merge-audio-video", {
-    video_url: videoUrl,
-    audio_url: audioUrl,
-  });
+/** The 9:16 cut is one compose call over the same takes, portrait first. The
+ * output frame follows the first keyframe, which is why the order is explicit. */
+export function orderShotsForSocial(shots) {
+  return [...shots].sort((a, b) => Number(Boolean(b.portrait)) - Number(Boolean(a.portrait)));
 }
 
 export async function readRenderResult(env, generation) {

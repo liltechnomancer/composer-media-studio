@@ -151,27 +151,42 @@ test("the same render request replays instead of dispatching twice", async () =>
   assert.equal(results[0].n, 1);
 });
 
-test("a social cut needs an assembled master", async () => {
+test("a 9:16 cut needs a portrait take and orders it first", async () => {
   const { env, project } = await setup();
   await addAsset(env, project, { id: "asset_clip01", kind: "video", durationMs: 6000 });
-  const composition = await createComposition(env, project, {
-    title: "Cut",
-    shots: [{ assetId: "asset_clip01" }, { assetId: "asset_clip01x" }],
-  }).catch(() => null);
-  assert.equal(composition, null);
   await addAsset(env, project, { id: "asset_clip02", kind: "video", durationMs: 6000 });
-  const real = await createComposition(env, project, {
+  const landscape = await createComposition(env, project, {
     title: "Cut",
     shots: [{ assetId: "asset_clip01" }, { assetId: "asset_clip02" }],
   });
   await assert.rejects(
-    createRender(env, project, { id: real.id, ...real, spec_json: JSON.stringify(real) }, {
+    createRender(env, project, { id: landscape.id, ...landscape, spec_json: JSON.stringify(landscape) }, {
       model: "studio-social",
       clientRequestId: "req_social0001",
-      masterAssetId: "asset_clip01",
     }),
-    /assembled result/,
+    /portrait take/,
   );
+
+  // A portrait take makes the same storyboard eligible; the dispatch order puts
+  // it first so the composed frame is vertical.
+  await env.DB.prepare(
+    "INSERT INTO assets(id,project_id,kind,r2_key,mime,bytes,width,height,duration_ms,sha256,title,caption,source,created_at,updated_at) VALUES('asset_tall1','?','video','k','video/mp4',10,768,960,5000,'h','Tall','','generated',1,1)".replace("'?'", "'" + project.id + "'"),
+  ).run();
+  const portrait = await createComposition(env, project, {
+    title: "Cut, portrait",
+    shots: [{ assetId: "asset_clip01" }, { assetId: "asset_tall1" }],
+  });
+  const created = await createRender(env, project, { id: portrait.id, ...portrait, spec_json: JSON.stringify(portrait) }, {
+    model: "studio-social",
+    clientRequestId: "req_social0002",
+  });
+  assert.equal(created.created, true);
+  const { orderShotsForSocial } = await import("../src/lib/providers.mjs");
+  const ordered = orderShotsForSocial([
+    { assetId: "asset_clip01", portrait: false },
+    { assetId: "asset_tall1", portrait: true },
+  ]);
+  assert.deepEqual(ordered.map((shot) => shot.assetId), ["asset_tall1", "asset_clip01"]);
 });
 
 test("render links are short-lived and bound to one asset and project", async () => {

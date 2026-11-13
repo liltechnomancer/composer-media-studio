@@ -17,7 +17,7 @@ Projects, uploads, thumbnails, the viewer, search and filters, renaming, downloa
 
 ## Storyboard and bounded assembly
 
-A composition is an ordered list of two to six saved clips (each at most 10.5 seconds, all of them at most 60 seconds) plus one optional saved audio bed. Saving a composition stores the manifest; rendering it creates one durable job that calls one bounded ffmpeg composition on fal.ai (`fal-ai/ffmpeg-api/compose`) and copies the assembled MP4 into this studio's R2. Editing a storyboard updates it in place and keeps every earlier render attached to it, so the interface can show that a cut has changed since its last render. Rendering again is a separate estimated request. A 9:16 social cut is a second, clearly labelled derivative made from the assembled master.
+A composition is an ordered list of two to six saved clips (each at most 10.5 seconds, all of them at most 60 seconds) plus one optional saved audio bed. Saving a composition stores the manifest; rendering it creates one durable job that calls one bounded ffmpeg composition on fal.ai (`fal-ai/ffmpeg-api/compose`) and copies the assembled MP4 into this studio's R2. Editing a storyboard updates it in place and keeps every earlier render attached to it, so the interface can show that a cut has changed since its last render. Rendering again is a separate estimated request. A 9:16 cut is a second, clearly labelled assembly of the same takes and audio bed, ordered portrait-first so the frame is vertical; it is not a re-frame of the master. A storyboard with no portrait take refuses the 9:16 cut with that reason.
 
 Studio Score takes a length of 10 to 30 seconds, so a generated bed can be chosen to fit the cut instead of being padded afterwards.
 

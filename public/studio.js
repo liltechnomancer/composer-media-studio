@@ -499,7 +499,7 @@ function compositionCard(composition) {
     ${changedSinceRender(composition, renders) ? `<p class="small" style="margin:0"><strong>Changed since the last render.</strong> Render again to include the latest edits; earlier results are kept.</p>` : ""}
     <div class="row">
       <button class="button secondary" data-action="compose-render" data-variant="assembly" data-id="${esc(composition.id)}" ${pending ? "disabled" : ""}>Render master · ${money(renderEstimate("assembly"))}</button>
-      <button class="button secondary" data-action="compose-render" data-variant="social" data-id="${esc(composition.id)}" ${pending || !master ? "disabled" : ""} title="${master ? "Make a 9:16 cut from the assembled master" : "Render a master first"}">Make 9:16 cut · ${money(renderEstimate("social"))}</button>
+      <button class="button secondary" data-action="compose-render" data-variant="social" data-id="${esc(composition.id)}" ${pending || !master ? "disabled" : ""} title="${master ? "The same takes and audio, assembled portrait-first for a vertical frame" : "Render a master first"}">Make 9:16 cut · ${money(renderEstimate("social"))}</button>
       <button class="quiet" data-action="compose-load" data-id="${esc(composition.id)}">Edit shots</button>
     </div>
     <div class="render-list">
@@ -517,7 +517,7 @@ function compositionCard(composition) {
         </div>`;
       }).join("")}
     </div>
-    ${social.length && master ? `<p class="small" style="margin:0">The 9:16 cut is re-framed from the assembled master and keeps its audio. It is a separate derivative, not a new generation of the clips.</p>` : ""}
+    ${social.length && master ? `<p class="small" style="margin:0">The 9:16 cut is its own portrait-first assembly of the same takes and audio bed, not a re-frame of the master and not a new generation of the clips.</p>` : ""}
   </article>`;
 }
 
@@ -1055,7 +1055,7 @@ async function handleAction(action, element) {
       const estimateMicro = renderEstimate(variant);
       const ok = await confirmAction(
         variant === "social" ? "Make a 9:16 cut?" : "Render this storyboard?",
-        `${variant === "social" ? "Re-frames the assembled master to 9:16 and keeps its audio." : `${composition.shots.length} clips, ${(composition.totalMs / 1000).toFixed(1)}s assembled.`} Estimated ${money(estimateMicro)}. The participating files are copied to the render provider for this job only.`,
+        `${variant === "social" ? "The same takes and audio bed, assembled with portrait takes first so the frame is vertical." : `${composition.shots.length} clips, ${(composition.totalMs / 1000).toFixed(1)}s assembled.`} Estimated ${money(estimateMicro)}. The participating files are copied to the render provider for this job only.`,
         `Render · ${money(estimateMicro)}`,
       );
       if (!ok) return;
@@ -1063,7 +1063,6 @@ async function handleAction(action, element) {
         method: "POST",
         body: JSON.stringify({
           model: variant === "social" ? "studio-social" : "studio-assembly",
-          masterAssetId: master?.assetId,
           clientRequestId: `req_${crypto.randomUUID().replaceAll("-", "")}`,
         }),
       });
