@@ -154,31 +154,58 @@ export function videoInfo(bytes) {
   let durationMs = null;
   let width = null;
   let height = null;
-  const limit = Math.min(bytes.length - 8, 2_000_000);
-  for (let index = 0; index < limit; index += 1) {
-    const tag = String.fromCharCode(bytes[index], bytes[index + 1], bytes[index + 2], bytes[index + 3]);
-    if (tag === "mvhd" && durationMs === null) {
-      const version = bytes[index + 4];
-      const view = new DataView(bytes.buffer, bytes.byteOffset + index + 4, 28);
-      const timescale = version === 1 ? view.getUint32(20) : view.getUint32(12);
-      const duration = version === 1 ? Number(view.getBigUint64(24)) : view.getUint32(16);
-      if (timescale > 0 && Number.isFinite(duration)) durationMs = Math.round((duration / timescale) * 1000);
-    }
-    if (tag === "tkhd" && width === null) {
-      const version = bytes[index + 4];
-      const base = index + 4 + (version === 1 ? 88 : 76);
-      if (base + 8 <= bytes.length) {
-        const view = new DataView(bytes.buffer, bytes.byteOffset + base, 8);
-        const w = view.getUint32(0) / 65536;
-        const h = view.getUint32(4) / 65536;
-        if (w >= 16 && h >= 16) {
-          width = Math.round(w);
-          height = Math.round(h);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const ascii = (offset) =>
+    String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+
+  const readBoxes = (start, end, depth = 0) => {
+    if (depth > 3) return;
+    let offset = start;
+    while (offset + 8 <= end) {
+      let size = view.getUint32(offset);
+      const type = ascii(offset + 4);
+      let header = 8;
+      if (size === 1) {
+        if (offset + 16 > end) return;
+        size = Number(view.getBigUint64(offset + 8));
+        header = 16;
+      } else if (size === 0) {
+        size = end - offset;
+      }
+      if (size < header || offset + size > end) return;
+
+      if (type === "moov" || type === "trak" || type === "mdia") {
+        readBoxes(offset + header, offset + size, depth + 1);
+      }
+      if (type === "mvhd" && durationMs === null) {
+        const version = bytes[offset + header];
+        const base = offset + header + 4;
+        if (base + (version === 1 ? 32 : 20) <= end) {
+          const timescale = version === 1 ? view.getUint32(base + 16) : view.getUint32(base + 8);
+          const duration = version === 1 ? Number(view.getBigUint64(base + 20)) : view.getUint32(base + 12);
+          if (timescale > 0 && Number.isFinite(duration))
+            durationMs = Math.round((duration / timescale) * 1000);
         }
       }
+      if (type === "tkhd" && width === null) {
+        const version = bytes[offset + header];
+        const payload = offset + header;
+        const widthOffset = version === 1 ? 88 : 76;
+        const heightOffset = widthOffset + 4;
+        if (payload + heightOffset + 4 <= end) {
+          const w = view.getUint32(payload + widthOffset) / 65536;
+          const h = view.getUint32(payload + heightOffset) / 65536;
+          if (w >= 16 && h >= 16) {
+            width = Math.round(w);
+            height = Math.round(h);
+          }
+        }
+      }
+      offset += size;
     }
-    if (durationMs !== null && width !== null) break;
-  }
+  };
+
+  readBoxes(0, bytes.length);
   return { durationMs, width, height };
 }
 

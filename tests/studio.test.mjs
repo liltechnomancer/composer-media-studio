@@ -124,20 +124,30 @@ test("image and video bytes are read without trusting the client", () => {
 });
 
 test("video duration and frame come from the MP4 boxes", () => {
-  const bytes = new Uint8Array(400);
-  const view = new DataView(bytes.buffer);
-  let offset = 32;
-  bytes.set([0, 0, 0, 100], offset);
-  bytes.set([...Buffer.from("mvhd")], offset + 4);
-  bytes[offset + 8] = 0; // version 0
-  view.setUint32(offset + 20, 1000); // timescale
-  view.setUint32(offset + 24, 5000); // duration
-  offset = 160;
-  bytes.set([0, 0, 0, 92], offset);
-  bytes.set([...Buffer.from("tkhd")], offset + 4);
-  bytes[offset + 8] = 0;
-  view.setUint32(offset + 84, 1280 * 65536);
-  view.setUint32(offset + 88, 720 * 65536);
+  const box = (type, payload) => {
+    const bytes = new Uint8Array(8 + payload.length);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, bytes.length);
+    bytes.set([...Buffer.from(type)], 4);
+    bytes.set(payload, 8);
+    return bytes;
+  };
+  const mvhdPayload = new Uint8Array(20);
+  const mvhdView = new DataView(mvhdPayload.buffer);
+  mvhdView.setUint32(12, 1000);
+  mvhdView.setUint32(16, 5000);
+  const tkhdPayload = new Uint8Array(84);
+  const tkhdView = new DataView(tkhdPayload.buffer);
+  tkhdView.setUint32(76, 1280 * 65536);
+  tkhdView.setUint32(80, 720 * 65536);
+  const moov = box("moov", new Uint8Array([
+    ...box("mvhd", mvhdPayload),
+    ...box("trak", new Uint8Array([...box("tkhd", tkhdPayload)])),
+  ]));
+  const mdat = box("mdat", new Uint8Array(4096));
+  const bytes = new Uint8Array(mdat.length + moov.length);
+  bytes.set(mdat, 0);
+  bytes.set(moov, mdat.length);
   assert.deepEqual(videoInfo(bytes), { durationMs: 5000, width: 1280, height: 720 });
 });
 
