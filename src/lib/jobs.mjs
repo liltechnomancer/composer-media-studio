@@ -19,6 +19,7 @@ import {
   validateSettings,
   cancelVideo,
 } from "./providers.mjs";
+import { builtinRecipe } from "./recipes.mjs";
 import {
   extensionFor,
   HttpError,
@@ -335,7 +336,7 @@ export async function saveGeneration(env, generation, bytes, format) {
         size.height ?? null,
         size.durationMs ?? null,
         hash,
-        String(request.prompt ?? "").slice(0, 80),
+        builtinRecipe(request.recipeId)?.title ?? (mime.startsWith("video/") ? "Generated clip" : "Generated still"),
         String(request.prompt ?? "").slice(0, 400),
         request.parentAssetId ?? null,
         generation.id,

@@ -335,7 +335,9 @@ function createView() {
   const images = state.project.assets.filter((asset) => asset.kind === "image");
   const selectedReference = images.find((asset) => asset.id === create.referenceAssetId);
   const needsReference = (model?.references ?? 0) > 0;
+  const fundingBlocked = state.project.generations.some((generation) => generation.error?.code === "provider_funding");
   return `
+    ${fundingBlocked ? `<p class="notice warn">The studio's video provider refused the last request for funding. Image work and the library still work; add credit to the studio's own provider account before starting another clip.</p>` : ""}
     <div class="grid two">
       <div class="card">
         <p class="eyebrow">1 · Choose a starting point</p>

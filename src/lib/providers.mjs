@@ -146,8 +146,10 @@ export function getModel(id) {
 
 export function estimateCost(model, settings = {}) {
   if (model.kind === "image") return model.costMicro;
-  const seconds = Number(settings.durationSeconds ?? model.durations?.[0] ?? 5);
-  return Math.round(model.costPerSecondMicro * seconds);
+  const base = model.durations?.[0] ?? 5;
+  const seconds = Number(settings.durationSeconds ?? base);
+  if (seconds === base) return model.costMicro;
+  return Math.round((model.costMicro * seconds) / base);
 }
 
 export function aspectDimensions(aspect, reference) {

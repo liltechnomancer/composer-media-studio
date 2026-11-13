@@ -50,7 +50,7 @@ function securityHeaders(response) {
   headers.set("permissions-policy", "camera=(), microphone=(), geolocation=()");
   headers.set(
     "content-security-policy",
-    "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   );
   return new Response(response.body, { status: response.status, headers });
 }
