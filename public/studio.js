@@ -514,7 +514,7 @@ function assetView() {
         </div>
         <p class="small" style="margin:0">${
           isVideo
-            ? `1. Download the poster still${still.title ? ` “${esc(still.title)}”` : ""}. 2. Import that still into Launch Kit. The clip stays here; only the still becomes the source artwork.`
+            ? `1. Download the retained still${still.title ? ` “${esc(still.title)}”` : ""}. 2. Import that still into Launch Kit. The clip stays here; only the still becomes the source artwork.`
             : "1. Download the still. 2. Import it into Launch Kit as the source artwork. Finishing and export stay in Launch Kit."
         }${launchKitUrl ? "" : " Open your own Launch Kit installation to import it."}</p>
       </div>`
