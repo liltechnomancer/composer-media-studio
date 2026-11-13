@@ -73,7 +73,7 @@ export function shell({ revision }) {
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header class="site-header">
-  <a class="wordmark" href="#/" aria-label="Media Studio home">${mark}<span>Media Studio</span></a>
+  <a class="wordmark" href="#/" aria-label="Media Studio home">${mark}<span>Media Studio</span><span class="brand-by">App Composer</span></a>
   <nav class="header-nav" aria-label="Studio">
     <a href="#/">Projects</a>
     <a href="/help" target="_blank" rel="noopener">Help</a>
@@ -102,7 +102,7 @@ export function shell({ revision }) {
 </html>`;
 }
 
-export function loginPage({ next = "/", revision = "dev" }) {
+export function loginPage({ next = "/", revision = "dev", bridged = false }) {
   return `${head({
     title: "Sign in — Media Studio",
     description: "Owner sign-in for an independent Media Studio.",
@@ -113,19 +113,23 @@ export function loginPage({ next = "/", revision = "dev" }) {
   <main class="card" id="main">
     <div class="mark">${mark}</div>
     <div>
-      <p class="eyebrow">Independent studio</p>
+      <p class="eyebrow">${bridged ? "App Composer · Media Studio" : "Independent studio"}</p>
       <h1 style="font-size:2rem">Your media, kept here.</h1>
     </div>
     <p>Upload and organise images and video, make new work with a funded model, and publish deliberately. Uploads and the library work without any AI account.</p>
+    ${bridged ? `<p class="notice calm">Open this studio from App Composer. Your existing Composer sign-in carries you in; there is no second password.</p>
+    <p><a class="button" href="https://composer.loftwah.com/media-studio/studio">Continue with App Composer</a></p>
+    <details><summary>Standalone owner sign-in</summary>` : ""}
     <form id="login-form" class="stack">
       <label>Owner passphrase
         <input name="username" type="text" autocomplete="username" value="owner" hidden>
         <input name="passphrase" type="password" autocomplete="current-password" required minlength="16" autofocus>
       </label>
       <input type="hidden" name="next" value="${escapeHtml(next)}">
-      <button class="button" type="submit">Open the studio</button>
+      <button class="button" type="submit">${bridged ? "Sign in with the owner passphrase" : "Open the studio"}</button>
       <p class="small" role="status" id="login-status"></p>
     </form>
+    ${bridged ? "</details>" : ""}
     <p class="small">This studio belongs to its own Cloudflare account and stores media in its own R2 bucket. It does not use your App Composer password.</p>
   </main>
 </div>
@@ -237,7 +241,7 @@ export function helpPage() {
   })}
 <body>
 <header class="site-header">
-  <a class="wordmark" href="/" aria-label="Media Studio home">${mark}<span>Media Studio</span></a>
+  <a class="wordmark" href="/" aria-label="Media Studio home">${mark}<span>Media Studio</span><span class="brand-by">App Composer</span></a>
   <nav class="header-nav"><a href="/">Open the studio</a></nav>
 </header>
 <main id="main" class="public-page">

@@ -1,6 +1,6 @@
 // MIT. Media Studio Worker: owner studio, public pages and the job engine.
 
-import { checkLoginRate, clearCookie, createSession, recordLoginFailure, requireOwner, sessionCookie, verifyPassphrase } from "./lib/auth.mjs";
+import { checkLoginRate, clearCookie, createSession, readBridgeToken, recordLoginFailure, requireOwner, sessionCookie, verifyPassphrase } from "./lib/auth.mjs";
 import {
   advanceGeneration,
   budgetSnapshot,
@@ -171,7 +171,7 @@ async function handleLogin(request, env) {
     const token = await createSession(env);
     return json({ ok: true }, 200, { "set-cookie": sessionCookie(token) });
   }
-  return new Response(loginPage({ next: "/", revision: BUILD.revision }), {
+  return new Response(loginPage({ next: "/", revision: BUILD.revision, bridged: Boolean(env.BRIDGE_SECRET) }), {
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
   });
 }
@@ -185,6 +185,14 @@ async function handleApi(request, env, url) {
   if (path === "/api/logout" && request.method === "POST") {
     assertSameOrigin(request, env);
     return json({ ok: true }, 200, { "set-cookie": clearCookie() });
+  }
+
+  if (path === "/api/bridge" && request.method === "POST") {
+    const input = await body(request);
+    const claim = await readBridgeToken(env, input.token);
+    if (!claim) throw new HttpError(401, "This Composer handoff is not valid or has expired", "unauthorized");
+    const token = await createSession(env);
+    return json({ ok: true, next: "/" }, 200, { "set-cookie": sessionCookie(token) });
   }
 
   if (path === "/api/session") {
@@ -509,6 +517,14 @@ async function handleApi(request, env, url) {
   }
 
   const publicationMatch = path.match(/^\/api\/publications\/([a-z0-9_]+)$/);
+  if (publicationMatch && method === "PATCH") {
+    const input = await body(request);
+    if (typeof input.hidden !== "boolean") throw new HttpError(400, "Send hidden: true or false", "invalid");
+    const row = await env.DB.prepare("SELECT id FROM publications WHERE id=?1 AND revoked_at IS NULL").bind(publicationMatch[1]).first();
+    if (!row) throw new HttpError(404, "Publication not found", "not_found");
+    await env.DB.prepare("UPDATE publications SET hidden=?2 WHERE id=?1").bind(row.id, input.hidden ? 1 : 0).run();
+    return json({ id: row.id, hidden: input.hidden });
+  }
   if (publicationMatch && method === "DELETE") {
     const row = await env.DB.prepare("SELECT id FROM publications WHERE id=?1").bind(publicationMatch[1]).first();
     if (!row) throw new HttpError(404, "Publication not found", "not_found");
@@ -745,11 +761,24 @@ async function handlePublic(request, env, url) {
     return json({
       ok: true,
       revision: BUILD.revision,
+      bridge: Boolean(env.BRIDGE_SECRET),
       builtAt: BUILD.builtAt,
       time: new Date().toISOString(),
     });
   }
   if (path === "/build.json") return json({ revision: BUILD.revision, builtAt: BUILD.builtAt });
+
+  if (path === "/bridge") {
+    const token = url.searchParams.get("token");
+    const claim = await readBridgeToken(env, token);
+    if (!claim)
+      return new Response(loginPage({ next: "/", revision: BUILD.revision, bridged: Boolean(env.BRIDGE_SECRET) }), {
+        status: 401,
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      });
+    const session = await createSession(env);
+    return new Response(null, { status: 302, headers: { location: "/", "set-cookie": sessionCookie(session), "cache-control": "no-store" } });
+  }
 
   if (path === "/login") return handleLogin(request, env);
   if (path === "/help") {
@@ -761,7 +790,7 @@ async function handlePublic(request, env, url) {
     const { readSession } = await import("./lib/auth.mjs");
     const session = await readSession(env, request);
     if (!session && path !== "/login")
-      return new Response(loginPage({ next: "/", revision: BUILD.revision }), {
+      return new Response(loginPage({ next: "/", revision: BUILD.revision, bridged: Boolean(env.BRIDGE_SECRET) }), {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
       });
     return new Response(shell({ revision: BUILD.revision }), {

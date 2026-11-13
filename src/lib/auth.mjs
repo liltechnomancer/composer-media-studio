@@ -63,6 +63,25 @@ export function clearCookie() {
   return `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
 }
 
+/** A short-lived handoff from App Composer's authenticated owner session.
+ * The browser never holds the Oyster owner key or this studio's passphrase. */
+export async function readBridgeToken(env, token) {
+  if (!env.BRIDGE_SECRET || env.BRIDGE_SECRET.length < 32) return null;
+  if (typeof token !== "string" || !token.includes(".")) return null;
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature) return null;
+  const expected = await sign(env.BRIDGE_SECRET, payload);
+  if (!constantTimeEqual(signature, expected)) return null;
+  try {
+    const claim = decode(payload);
+    if (!claim || claim.aud !== "media-studio" || claim.sub !== "owner") return null;
+    if (typeof claim.exp !== "number" || claim.exp < now()) return null;
+    return claim;
+  } catch {
+    return null;
+  }
+}
+
 export async function requireOwner(env, request) {
   const session = await readSession(env, request);
   if (!session || session.actor !== "owner")
