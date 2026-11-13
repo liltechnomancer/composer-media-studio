@@ -111,7 +111,7 @@ function imageRequest(overrides = {}) {
 test("model settings are validated on the server", () => {
   assert.throws(() => validateSettings(getModel("studio-draft"), { prompt: "x", aspect: "tall" }), /frame/);
   assert.throws(() => validateSettings(getModel("hailuo-standard"), { prompt: "x", durationSeconds: 7 }), /second/);
-  const settings = validateSettings(getModel("studio-detail"), { prompt: " change the light ", aspect: "match-reference" });
+  const settings = validateSettings(getModel("studio-detail"), { prompt: " change the light ", aspect: "square" });
   assert.equal(settings.prompt, "change the light");
   assert.ok(publicModels().every((model) => model.costMicro > 0 && model.costBasis.length > 20));
 });
@@ -234,7 +234,7 @@ test("a reference must belong to the same project and be a still", async () => {
     .bind(timestamp)
     .run();
   await assert.rejects(
-    createGeneration(env, project, imageRequest({ model: "studio-detail", aspect: "match-reference", referenceAssetId: "asset_other" })),
+    createGeneration(env, project, imageRequest({ model: "studio-detail", aspect: "square", referenceAssetId: "asset_other" })),
     /not in this project/,
   );
 });

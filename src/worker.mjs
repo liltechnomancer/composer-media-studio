@@ -169,7 +169,7 @@ async function handleLogin(request, env) {
     const token = await createSession(env);
     return json({ ok: true }, 200, { "set-cookie": sessionCookie(token) });
   }
-  return new Response(loginPage({ next: "/" }), {
+  return new Response(loginPage({ next: "/", revision: BUILD.revision }), {
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
   });
 }
@@ -637,7 +637,7 @@ async function uploadAsset(request, env, project) {
 
 async function handlePublic(request, env, url) {
   const path = url.pathname;
-  const publicationMatch = path.match(/^\/p\/([A-Za-z0-9_-]+)(\/poster|\/download)?$/);
+  const publicationMatch = path.match(/^\/p\/([A-Za-z0-9_-]+)(\/poster|\/download|\/media)?$/);
   if (publicationMatch) {
     const [, publicSlug, extra] = publicationMatch;
     const publication = await env.DB.prepare(
@@ -651,6 +651,7 @@ async function handlePublic(request, env, url) {
       throw new HttpError(404, "This page is not published", "not_found");
 
     if (extra === "/download") return servePublished(env, publication.asset_id, true);
+    if (extra === "/media") return servePublished(env, publication.asset_id, false);
     if (extra === "/poster") {
       if (!publication.poster_asset_id) throw new HttpError(404, "No poster for this page", "not_found");
       return servePublished(env, publication.poster_asset_id, false);
@@ -672,7 +673,8 @@ async function handlePublic(request, env, url) {
       height: publication.height,
       durationMs: publication.duration_ms,
       bytes: publication.bytes,
-      media: `/p/${publication.slug}/download`,
+      media: `/p/${publication.slug}/media`,
+      download: `/p/${publication.slug}/download`,
       poster,
       origin: env.PUBLIC_ORIGIN || url.origin,
       slug: publication.slug,
@@ -713,7 +715,7 @@ async function handlePublic(request, env, url) {
     const { readSession } = await import("./lib/auth.mjs");
     const session = await readSession(env, request);
     if (!session && path !== "/login")
-      return new Response(loginPage({ next: "/" }), {
+      return new Response(loginPage({ next: "/", revision: BUILD.revision }), {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
       });
     return new Response(shell({ revision: BUILD.revision }), {

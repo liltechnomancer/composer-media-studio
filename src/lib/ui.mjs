@@ -61,12 +61,12 @@ export function shell({ revision }) {
     </div>
   </form>
 </dialog>
-<script type="module" src="/studio.js"></script>
+<script type="module" src="/studio.js?v=${encodeURIComponent(revision)}"></script>
 </body>
 </html>`;
 }
 
-export function loginPage({ next = "/" }) {
+export function loginPage({ next = "/", revision = "dev" }) {
   return `${head({
     title: "Sign in — Media Studio",
     description: "Owner sign-in for an independent Media Studio.",
@@ -83,6 +83,7 @@ export function loginPage({ next = "/" }) {
     <p>Upload and organise images and video, make new work with a funded model, and publish deliberately. Uploads and the library work without any AI account.</p>
     <form id="login-form" class="stack">
       <label>Owner passphrase
+        <input name="username" type="text" autocomplete="username" value="owner" hidden>
         <input name="passphrase" type="password" autocomplete="current-password" required minlength="16" autofocus>
       </label>
       <input type="hidden" name="next" value="${escapeHtml(next)}">
@@ -92,7 +93,7 @@ export function loginPage({ next = "/" }) {
     <p class="small">This studio belongs to its own Cloudflare account and stores media in its own R2 bucket. It does not use your App Composer password.</p>
   </main>
 </div>
-<script type="module" src="/login.js"></script>
+<script type="module" src="/login.js?v=${encodeURIComponent(revision)}"></script>
 </body>
 </html>`;
 }
@@ -107,6 +108,7 @@ export function publicPage({
   durationMs,
   bytes,
   media,
+  download,
   poster,
   origin,
   slug,
@@ -137,13 +139,13 @@ export function publicPage({
     <div class="media">
       ${
         isVideo
-          ? `<video controls playsinline preload="metadata" ${poster ? `poster="${escapeHtml(poster)}"` : ""} aria-label="${escapeHtml(title)}"><source src="${escapeHtml(media)}" type="${escapeHtml(mime)}">Your browser cannot play this video. <a href="${escapeHtml(media)}">Download it instead</a>.</video>`
+          ? `<video controls playsinline preload="metadata" ${poster ? `poster="${escapeHtml(poster)}"` : ""} aria-label="${escapeHtml(title)}"><source src="${escapeHtml(media)}" type="${escapeHtml(mime)}">Your browser cannot play this video. <a href="${escapeHtml(download)}">Download it instead</a>.</video>`
           : `<img src="${escapeHtml(media)}" alt="${escapeHtml(title)}" ${width ? `width="${width}" height="${height}"` : ""} decoding="async">`
       }
     </div>
     <figcaption class="caption">
       <span>${escapeHtml(facts)}</span>
-      <a href="${escapeHtml(media)}" download>Download ${isVideo ? "video" : "image"}</a>
+      <a href="${escapeHtml(download)}" download>Download ${isVideo ? "video" : "image"}</a>
     </figcaption>
   </figure>
   <p class="small">A deliberately published piece. Private projects, other media and prompts stay in the studio. Withdrawing this page stops new visits here; copies someone already downloaded cannot be recalled.</p>

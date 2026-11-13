@@ -60,7 +60,7 @@ async function api(path, options = {}) {
 
 function money(micro) {
   const value = Number(micro ?? 0) / 1_000_000;
-  return value === 0 ? "$0.00" : value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+  return value === 0 ? "$0.00" : value < 0.01 ? `$${value.toFixed(3)}` : `$${value.toFixed(2)}`;
 }
 
 function bytesLabel(bytes) {
@@ -145,16 +145,19 @@ async function loadProject(id) {
 
 function defaultCreate() {
   const defaults = state.project?.defaults ?? {};
+  const recipe = recipeBySlug("editorial-print");
+  const controls = {};
+  const aspectControl = recipe?.controls.find((control) => control.key === "aspect");
   return {
-    recipeSlug: "editorial-print",
-    kind: "image",
-    model: defaults.imageModel ?? "studio-draft",
-    prompt: "",
-    aspect: defaults.aspect ?? "portrait",
+    recipeSlug: recipe?.slug ?? "editorial-print",
+    kind: recipe?.kind ?? "image",
+    model: recipe?.model ?? defaults.imageModel ?? "studio-print",
+    prompt: recipe ? promptFromRecipe(recipe, controls) : "",
+    aspect: aspectControl?.default ?? defaults.aspect ?? "portrait",
     durationSeconds: defaults.durationSeconds ?? 6,
     referenceAssetId: null,
     parentAssetId: null,
-    controls: {},
+    controls,
   };
 }
 
@@ -203,7 +206,7 @@ function homeView() {
       <div class="card">
         <h2 style="font-size:1.1rem">What works without AI</h2>
         <p class="small">Uploads, project collections, search, download, deletion, provenance and the library itself. Generation is a separate capability with an estimate before every paid request.</p>
-        <p class="small">Video generation: ${state.videosConfigured ? "ready on this studio" : "<strong>needs a fal.ai key on this studio</strong>"}.</p>
+        <p class="small">Video generation: ${state.videosConfigured ? "configured with fal.ai; the provider checks funding on submit" : "<strong>needs a fal.ai key on this studio</strong>"}.</p>
       </div>
     </section>
     <div class="spread"><h2 style="margin:0">Your studios</h2><button class="button" data-action="new-project">New studio</button></div>
@@ -383,7 +386,7 @@ function createView() {
 
 function recipeControls(recipe, create) {
   return recipe.controls
-    .filter((control) => control.type !== "reference")
+    .filter((control) => control.type !== "reference" && control.application !== "provider-native")
     .map((control) => {
       const value = create.controls[control.key] ?? control.default ?? "";
       if (control.type === "select")
@@ -610,7 +613,10 @@ async function handleAction(action, element) {
       state.create.controls = {};
       state.create.prompt = promptFromRecipe(recipe, {});
       state.create.model = recipe.model ?? state.create.model;
-      if (recipe.kind === "video") state.create.durationSeconds = 6;
+      const aspectControl = recipe.controls.find((control) => control.key === "aspect");
+      if (aspectControl?.default) state.create.aspect = aspectControl.default;
+      const durationControl = recipe.controls.find((control) => control.key === "duration");
+      if (durationControl?.default) state.create.durationSeconds = Number(durationControl.default);
       render();
       return;
     }
@@ -853,6 +859,7 @@ async function submitCreate() {
   });
   state.project.budget = result.budget;
   state.project.generations.unshift(result.generation);
+  if (result.generation.status === "saved") await loadProject(state.projectId);
   state.tab = "history";
   location.hash = `#/p/${state.projectId}/history`;
   render();
