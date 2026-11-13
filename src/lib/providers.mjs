@@ -525,8 +525,14 @@ export async function readRenderResult(env, generation) {
   const response = await fetch(generation.provider_response_url, {
     headers: { authorization: `Key ${falKey(env)}` },
   });
-  if (!response.ok)
-    throw new HttpError(502, `Render provider result read failed (${response.status})`, "provider_error");
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new HttpError(
+      502,
+      `Render provider result read failed (${response.status})${detail ? `: ${detail.slice(0, 180)}` : ""}`,
+      "provider_error",
+    );
+  }
   const payload = await response.json().catch(() => null);
   const file =
     payload?.video ??
