@@ -443,6 +443,13 @@ export async function advanceGeneration(env, generation) {
     return fresh;
   }
 
+  // A result read that failed leaves the job at provider_complete with no saved
+  // bytes. Reading the same provider result again is free and idempotent, so a
+  // reconcile can recover it without dispatching anything new.
+  if (fresh.status === "provider_complete" && !fresh.retained_key && fresh.provider_response_url && fresh.provider_request_id) {
+    return completeJob(env, fresh, { responseUrl: fresh.provider_response_url });
+  }
+
   if (fresh.status === "submitting") {
     // A worker can die between the dispatch lease and the provider reply.
     // The provider may or may not have started: never resubmit automatically.
