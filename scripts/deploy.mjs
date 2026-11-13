@@ -35,8 +35,14 @@ const origin = run(["git", "rev-parse", "origin/main"], { capture: true }).trim(
 if (head !== origin) fail("main is not pushed; push the reviewed commit first");
 
 const manifest = JSON.parse(readFileSync(new URL("../app.manifest.json", import.meta.url), "utf8"));
-if (manifest.repository !== "https://github.com/loftwah/composer-media-studio")
-  fail("manifest repository does not match this app");
+const originRepository = run(["git", "remote", "get-url", "origin"], { capture: true })
+  .trim()
+  .replace(/^git@github\.com:/, "https://github.com/")
+  .replace(/\.git$/, "");
+if (manifest.repository !== originRepository)
+  fail(
+    `manifest repository ${manifest.repository} does not match this copy's origin ${originRepository}; set app.manifest.json to the repository this owner controls`,
+  );
 
 console.log(`checking ${head.slice(0, 12)}…`);
 run(["pnpm", "check"]);
@@ -62,7 +68,12 @@ run([
   `__BUILD_TIME__:${JSON.stringify(builtAt)}`,
 ]);
 
-const originUrl = "https://media.loftwah.com";
+const wranglerSource = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8")
+  .replace(/^\s*\/\/.*$/gm, "")
+  .replace(/\/\*[\s\S]*?\*\//g, "");
+const wranglerConfig = JSON.parse(wranglerSource);
+const originUrl = String(process.env.PUBLIC_ORIGIN ?? wranglerConfig.vars.PUBLIC_ORIGIN).replace(/\/$/, "");
+if (!originUrl.startsWith("https://")) fail("PUBLIC_ORIGIN must be an HTTPS origin");
 const health = await fetch(`${originUrl}/healthz`, { headers: { "cache-control": "no-cache" } });
 if (!health.ok) fail(`live health check failed (${health.status})`);
 const payload = await health.json();
