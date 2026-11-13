@@ -75,8 +75,12 @@ export async function readBridgeToken(env, token) {
   try {
     const claim = decode(payload);
     if (!claim || claim.aud !== "media-studio" || claim.sub !== "owner") return null;
-    if (typeof claim.exp !== "number" || claim.exp < now()) return null;
-    return claim;
+    if (typeof claim.exp !== "number") return null;
+    // A handoff may express its expiry in seconds or milliseconds. Normalise
+    // rather than reject a correct token minted by the other side.
+    const expires = claim.exp < 1e12 ? claim.exp * 1000 : claim.exp;
+    if (expires < now()) return null;
+    return { ...claim, exp: expires };
   } catch {
     return null;
   }
