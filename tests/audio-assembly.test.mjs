@@ -1,0 +1,237 @@
+// MIT. Focused checks for the two later capabilities: audio as a saved asset
+// with real format/duration, and the bounded composition render.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  buildCompositionSpec,
+  createComposition,
+  createGeneration,
+  createRender,
+  saveGeneration,
+  updateComposition,
+} from "../src/lib/jobs.mjs";
+import { getModel, publicModels, validateSettings } from "../src/lib/providers.mjs";
+import { signRenderLink, verifyRenderLink } from "../src/lib/render-links.mjs";
+import { audioInfo, sniffMedia } from "../src/lib/util.mjs";
+import { addAsset, mp3FrameHeader, setup, wav } from "./harness.mjs";
+
+test("audio duration and format come from the bytes", () => {
+  const wavBytes = wav({ seconds: 3, sampleRate: 22050, channels: 2, bits: 16 });
+  assert.equal(sniffMedia(wavBytes, "").mime, "audio/wav");
+  const info = audioInfo(wavBytes);
+  assert.equal(info.format, "wav");
+  assert.equal(info.sampleRate, 22050);
+  assert.equal(info.channels, 2);
+  assert.equal(info.durationMs, 3000);
+
+  const mp3 = new Uint8Array(64000);
+  mp3.set(mp3FrameHeader(), 0);
+  assert.equal(sniffMedia(mp3, "").kind, "audio");
+  const mp3Info = audioInfo(mp3);
+  assert.equal(mp3Info.format, "mp3");
+  assert.equal(mp3Info.sampleRate, 44100);
+  assert.equal(mp3Info.channels, 2);
+  assert.equal(mp3Info.durationMs, 4000);
+});
+
+test("sound is a first-class kind with its own validated models", () => {
+  const score = getModel("studio-score");
+  const voice = getModel("studio-voice");
+  assert.equal(score.kind, "audio");
+  assert.equal(voice.audio.mode, "speech");
+  assert.deepEqual(validateSettings(score, { prompt: " slow strings " }), {
+    prompt: "slow strings",
+    durationSeconds: 30,
+  });
+  assert.throws(() => validateSettings(voice, { prompt: "x".repeat(1300) }), /characters/);
+  assert.ok(publicModels().some((model) => model.kind === "audio"));
+  assert.ok(publicModels().some((model) => model.render === "assembly"));
+});
+
+test("a saved audio result keeps its own kind, duration and channel count", async () => {
+  const { env, project } = await setup();
+  const { generation } = await createGeneration(env, project, {
+    kind: "audio",
+    model: "studio-score",
+    recipeId: "freeform",
+    prompt: "A quiet tide of warm strings",
+    clientRequestId: "req_audiotrack1",
+  });
+  const mp3 = new Uint8Array(64000);
+  mp3.set(mp3FrameHeader(), 0);
+  const saved = await saveGeneration(env, generation, mp3, "mp3");
+  assert.equal(saved.status, "saved");
+  const asset = await env.DB.prepare("SELECT * FROM assets WHERE id=?1").bind(saved.output_asset_id).first();
+  assert.equal(asset.kind, "audio");
+  assert.equal(asset.mime, "audio/mpeg");
+  assert.equal(asset.duration_ms, 4000);
+  assert.equal(asset.channels, 2);
+});
+
+test("a composition only accepts this project's bounded clips", async () => {
+  const { env, project } = await setup();
+  await addAsset(env, project, { id: "asset_clip01", kind: "video", durationMs: 6000 });
+  await addAsset(env, project, { id: "asset_clip02", kind: "video", durationMs: 6000 });
+  await addAsset(env, project, { id: "asset_clip03", kind: "video", durationMs: 6000 });
+  await addAsset(env, project, { id: "asset_still1", kind: "image" });
+  await addAsset(env, project, { id: "asset_audio1", kind: "audio", durationMs: 30000 });
+
+  await assert.rejects(buildCompositionSpec(env, project, { title: "One", shots: [{ assetId: "asset_clip01" }] }), /two saved clips/);
+  await assert.rejects(
+    buildCompositionSpec(env, project, {
+      title: "Still",
+      shots: [{ assetId: "asset_clip01" }, { assetId: "asset_still1" }],
+    }),
+    /saved clip/,
+  );
+  await assert.rejects(
+    buildCompositionSpec(env, project, {
+      title: "Other project",
+      shots: [{ assetId: "asset_clip01" }, { assetId: "asset_unknown" }],
+    }),
+    /saved clip/,
+  );
+
+  const spec = await buildCompositionSpec(env, project, {
+    title: "Field notes",
+    shots: [{ assetId: "asset_clip02" }, { assetId: "asset_clip01" }, { assetId: "asset_clip03" }],
+    audioAssetId: "asset_audio1",
+  });
+  assert.equal(spec.totalMs, 18000);
+  assert.equal(spec.audioAssetId, "asset_audio1");
+  assert.deepEqual(spec.shots.map((shot) => shot.assetId), ["asset_clip02", "asset_clip01", "asset_clip03"]);
+});
+
+test("an edited composition keeps the manifest its earlier render used", async () => {
+  const { env, project } = await setup();
+  await addAsset(env, project, { id: "asset_clip01", kind: "video", durationMs: 6000 });
+  await addAsset(env, project, { id: "asset_clip02", kind: "video", durationMs: 6000 });
+  const composition = await createComposition(env, project, {
+    title: "Cut one",
+    shots: [{ assetId: "asset_clip01" }, { assetId: "asset_clip02" }],
+  });
+  const created = await createRender(env, project, { id: composition.id, ...composition, spec_json: JSON.stringify(composition) }, {
+    model: "studio-assembly",
+    clientRequestId: "req_render0001",
+  });
+  assert.equal(created.created, true);
+  const firstManifest = JSON.parse(created.generation.request_json);
+  assert.equal(firstManifest.totalMs, 12000);
+
+  await updateComposition(env, project, { id: composition.id }, {
+    title: "Cut one, tightened",
+    shots: [{ assetId: "asset_clip02" }, { assetId: "asset_clip01" }],
+  });
+  const render = await env.DB.prepare("SELECT * FROM generations WHERE id=?1").bind(created.generation.id).first();
+  const manifest = JSON.parse(render.request_json);
+  assert.equal(manifest.totalMs, 12000);
+  assert.equal(manifest.title, "Cut one");
+  assert.deepEqual(manifest.shots.map((shot) => shot.assetId), ["asset_clip01", "asset_clip02"]);
+  const edited = await env.DB.prepare("SELECT * FROM compositions WHERE id=?1").bind(composition.id).first();
+  assert.equal(edited.title, "Cut one, tightened");
+  assert.deepEqual(JSON.parse(edited.spec_json).shots.map((shot) => shot.assetId), ["asset_clip02", "asset_clip01"]);
+});
+
+test("the same render request replays instead of dispatching twice", async () => {
+  const { env, project } = await setup();
+  await addAsset(env, project, { id: "asset_clip01", kind: "video", durationMs: 6000 });
+  await addAsset(env, project, { id: "asset_clip02", kind: "video", durationMs: 6000 });
+  const composition = await createComposition(env, project, {
+    title: "Cut",
+    shots: [{ assetId: "asset_clip01" }, { assetId: "asset_clip02" }],
+  });
+  const row = { id: composition.id, ...composition, spec_json: JSON.stringify(composition) };
+  const first = await createRender(env, project, row, { model: "studio-assembly", clientRequestId: "req_render0002" });
+  const second = await createRender(env, project, row, { model: "studio-assembly", clientRequestId: "req_render0002" });
+  assert.equal(second.created, false);
+  assert.equal(second.generation.id, first.generation.id);
+  const { results } = await env.DB.prepare("SELECT COUNT(*) AS n FROM generations WHERE composition_id=?1").bind(composition.id).all();
+  assert.equal(results[0].n, 1);
+});
+
+test("a social cut needs an assembled master", async () => {
+  const { env, project } = await setup();
+  await addAsset(env, project, { id: "asset_clip01", kind: "video", durationMs: 6000 });
+  const composition = await createComposition(env, project, {
+    title: "Cut",
+    shots: [{ assetId: "asset_clip01" }, { assetId: "asset_clip01x" }],
+  }).catch(() => null);
+  assert.equal(composition, null);
+  await addAsset(env, project, { id: "asset_clip02", kind: "video", durationMs: 6000 });
+  const real = await createComposition(env, project, {
+    title: "Cut",
+    shots: [{ assetId: "asset_clip01" }, { assetId: "asset_clip02" }],
+  });
+  await assert.rejects(
+    createRender(env, project, { id: real.id, ...real, spec_json: JSON.stringify(real) }, {
+      model: "studio-social",
+      clientRequestId: "req_social0001",
+      masterAssetId: "asset_clip01",
+    }),
+    /assembled result/,
+  );
+});
+
+test("render links are short-lived and bound to one asset and project", async () => {
+  const { env } = await setup();
+  const link = await signRenderLink(env, { assetId: "asset_clip01", projectId: "prj_test" });
+  const url = new URL(link);
+  assert.equal(url.hostname, "studio.test");
+  assert.equal(url.pathname, "/render-input/asset_clip01");
+  const query = Object.fromEntries(url.searchParams);
+  assert.equal(
+    await verifyRenderLink(env, {
+      assetId: "asset_clip01",
+      projectId: query.p,
+      expires: query.e,
+      signature: query.s,
+    }),
+    true,
+  );
+  assert.equal(
+    await verifyRenderLink(env, {
+      assetId: "asset_clip02",
+      projectId: query.p,
+      expires: query.e,
+      signature: query.s,
+    }),
+    false,
+  );
+  assert.equal(
+    await verifyRenderLink(env, {
+      assetId: "asset_clip01",
+      projectId: query.p,
+      expires: String(Number(query.e) - 10_000_000),
+      signature: query.s,
+    }),
+    false,
+  );
+  assert.equal(
+    await verifyRenderLink(env, {
+      assetId: "asset_clip01",
+      projectId: "prj_other",
+      expires: query.e,
+      signature: query.s,
+    }),
+    false,
+  );
+});
+
+test("a missing provider key fails definitively instead of becoming unknown", async () => {
+  const { env, project } = await setup();
+  const { generation } = await createGeneration(env, project, {
+    kind: "audio",
+    model: "studio-score",
+    recipeId: "freeform",
+    prompt: "A slow tide",
+    clientRequestId: "req_nokey00001",
+  });
+  const { dispatchGeneration } = await import("../src/lib/jobs.mjs");
+  const failed = await dispatchGeneration(env, generation);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.error_code, "provider_not_configured");
+  const budget = await env.DB.prepare("SELECT * FROM budgets WHERE project_id=?1").bind(project.id).first();
+  assert.equal(budget.reserved_micro, 0);
+});

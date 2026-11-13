@@ -209,15 +209,123 @@ export function videoInfo(bytes) {
   return { durationMs, width, height };
 }
 
+/** WAV, MP3 and MP4-family audio, read from the bytes rather than the label. */
+export function audioInfo(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const ascii = (offset, length = 4) =>
+    String.fromCharCode(...bytes.slice(offset, offset + length));
+
+  if (ascii(0, 4) === "RIFF" && ascii(8, 4) === "WAVE") {
+    let offset = 12;
+    let channels = null;
+    let sampleRate = null;
+    let byteRate = null;
+    let durationMs = null;
+    while (offset + 8 <= bytes.length) {
+      const chunk = ascii(offset, 4);
+      const size = view.getUint32(offset + 4, true);
+      const start = offset + 8;
+      if (chunk === "fmt " && start + 16 <= bytes.length) {
+        channels = view.getUint16(start + 2, true) || null;
+        sampleRate = view.getUint32(start + 4, true) || null;
+        byteRate = view.getUint32(start + 8, true) || null;
+      }
+      if (chunk === "data") {
+        const dataSize = Math.min(size, bytes.length - start);
+        if (byteRate) durationMs = Math.round((dataSize / byteRate) * 1000);
+      }
+      offset = start + size + (size % 2);
+    }
+    return { durationMs, sampleRate, channels, format: "wav" };
+  }
+
+  if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+    const size =
+      ((bytes[6] & 0x7f) << 21) | ((bytes[7] & 0x7f) << 14) | ((bytes[8] & 0x7f) << 7) | (bytes[9] & 0x7f);
+    return readMp3(bytes, view, Math.min(10 + size, bytes.length));
+  }
+
+  if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return readMp3(bytes, view, 0);
+
+  if (ascii(4, 4) === "ftyp") {
+    const duration = videoInfo(bytes).durationMs;
+    return { durationMs: duration, sampleRate: null, channels: null, format: "m4a" };
+  }
+
+  return { durationMs: null, sampleRate: null, channels: null, format: null };
+}
+
+function readMp3(bytes, view, start) {
+  let offset = start;
+  while (offset + 4 < bytes.length) {
+    if (bytes[offset] !== 0xff || (bytes[offset + 1] & 0xe0) !== 0xe0) {
+      offset += 1;
+      continue;
+    }
+    const versionBits = (bytes[offset + 1] >> 3) & 0x03;
+    const layerBits = (bytes[offset + 1] >> 1) & 0x03;
+    const bitrateIndex = (bytes[offset + 2] >> 4) & 0x0f;
+    const rateIndex = (bytes[offset + 2] >> 2) & 0x03;
+    const padding = (bytes[offset + 2] >> 1) & 0x01;
+    const mode = (bytes[offset + 3] >> 6) & 0x03;
+    if (versionBits === 1 || layerBits === 0 || bitrateIndex === 0 || bitrateIndex === 15 || rateIndex === 3) {
+      offset += 1;
+      continue;
+    }
+    const mpeg1 = versionBits === 3;
+    const bitrates = mpeg1
+      ? [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320]
+      : [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+    const rates = mpeg1
+      ? [44100, 48000, 32000]
+      : versionBits === 2
+        ? [22050, 24000, 16000]
+        : [11025, 12000, 8000];
+    const bitrateKbps = bitrates[bitrateIndex];
+    const sampleRate = rates[rateIndex];
+    const samplesPerFrame = mpeg1 ? 1152 : 576;
+    const frameLength = Math.floor((samplesPerFrame / 8) * ((bitrateKbps * 1000) / sampleRate)) + padding;
+
+    // A Xing/Info header carries the real frame count, so a VBR file is not
+    // misreported as its first frame's bitrate.
+    const xingOffset = offset + 4 + (mpeg1 ? (mode === 3 ? 17 : 32) : mode === 3 ? 9 : 17);
+    const tag = String.fromCharCode(...bytes.slice(xingOffset, xingOffset + 4));
+    if (tag === "Xing" || tag === "Info") {
+      const flags = view.getUint32(xingOffset + 4);
+      if (flags & 0x0001) {
+        const frames = view.getUint32(xingOffset + 8);
+        return {
+          durationMs: Math.round((frames * samplesPerFrame * 1000) / sampleRate),
+          sampleRate,
+          channels: mode === 3 ? 1 : 2,
+          format: "mp3",
+        };
+      }
+    }
+    const audioBytes = Math.max(0, bytes.length - offset);
+    return {
+      durationMs: Math.round((audioBytes * 8 * 1000) / (bitrateKbps * 1000)),
+      sampleRate,
+      channels: mode === 3 ? 1 : 2,
+      format: "mp3",
+    };
+  }
+  return { durationMs: null, sampleRate: null, channels: null, format: null };
+}
+
 export function sniffMedia(bytes, declaredMime) {
   const head = bytes.slice(0, 16);
   const ascii = (start, end) => String.fromCharCode(...head.slice(start, end));
   if (head[0] === 0xff && head[1] === 0xd8) return { mime: "image/jpeg", kind: "image" };
   if (head[0] === 0x89 && ascii(1, 4) === "PNG") return { mime: "image/png", kind: "image" };
   if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") return { mime: "image/webp", kind: "image" };
+  if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WAVE") return { mime: "audio/wav", kind: "audio" };
+  if (head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33) return { mime: "audio/mpeg", kind: "audio" };
+  if (head[0] === 0xff && (head[1] & 0xe0) === 0xe0) return { mime: "audio/mpeg", kind: "audio" };
   if (ascii(4, 8) === "ftyp") {
     const brand = ascii(8, 12);
     if (brand.includes("avif")) return { mime: "image/avif", kind: "image" };
+    if (["M4A ", "M4B ", "M4P ", "F4A "].includes(brand)) return { mime: "audio/mp4", kind: "audio" };
     return { mime: "video/mp4", kind: "video" };
   }
   if (head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3)
@@ -239,6 +347,14 @@ export function extensionFor(mime) {
       return "mp4";
     case "video/webm":
       return "webm";
+    case "audio/mpeg":
+      return "mp3";
+    case "audio/wav":
+      return "wav";
+    case "audio/mp4":
+      return "m4a";
+    case "audio/ogg":
+      return "ogg";
     default:
       return "bin";
   }

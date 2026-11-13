@@ -5,8 +5,12 @@ import {
   advanceGeneration,
   budgetSnapshot,
   cancelGeneration,
+  createComposition,
   createGeneration,
+  createRender,
   dispatchGeneration,
+  updateComposition,
+  dispatchRender,
   loadGeneration,
   loadProject,
   pendingGenerations,
@@ -17,7 +21,9 @@ import { publicModels } from "./lib/providers.mjs";
 import { builtinRecipe, projectRecipes, renderPrompt, builtinRecipes } from "./lib/recipes.mjs";
 import { reuseStillFor, sharingDestinations } from "./lib/sharing.mjs";
 import { shell, loginPage, publicPage, notFoundPage, helpPage } from "./lib/ui.mjs";
+import { verifyRenderLink } from "./lib/render-links.mjs";
 import {
+  audioInfo,
   escapeHtml,
   extensionFor,
   HttpError,
@@ -42,6 +48,7 @@ const BUILD = {
 
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 64 * 1024 * 1024;
+const MAX_AUDIO_BYTES = 32 * 1024 * 1024;
 
 function securityHeaders(response) {
   const headers = new Headers(response.headers);
@@ -93,6 +100,8 @@ function assetView(asset, extra = {}) {
     width: asset.width,
     height: asset.height,
     durationMs: asset.duration_ms,
+    sampleRate: asset.sample_rate ?? null,
+    channels: asset.channels ?? null,
     sha256: asset.sha256,
     source: asset.source,
     parentAssetId: asset.parent_asset_id,
@@ -112,6 +121,8 @@ function generationView(generation, extra = {}) {
     status: generation.status,
     model: generation.model,
     recipeId: generation.recipe_id,
+    compositionId: generation.composition_id ?? null,
+    variant: request.variant ?? null,
     prompt: request.prompt ?? "",
     aspect: request.aspect ?? null,
     durationSeconds: request.durationSeconds ?? null,
@@ -151,7 +162,7 @@ async function projectSummary(env, project) {
     defaults: safeJson(project.defaults_json, {}),
     createdAt: project.created_at,
     updatedAt: project.updated_at,
-    counts: { image: byKind.image ?? 0, video: byKind.video ?? 0 },
+    counts: { image: byKind.image ?? 0, video: byKind.video ?? 0, audio: byKind.audio ?? 0 },
     cover: cover ? `/api/assets/${cover.id}/file` : null,
     budget: await budgetSnapshot(env, project.id),
   };
@@ -278,11 +289,35 @@ async function handleApi(request, env, url) {
           }),
         ]),
       );
+      const compositions = await env.DB.prepare(
+        "SELECT * FROM compositions WHERE project_id=?1 ORDER BY created_at DESC",
+      )
+        .bind(project.id)
+        .all();
+      const renderRows = await env.DB.prepare(
+        "SELECT * FROM generations WHERE project_id=?1 AND composition_id IS NOT NULL ORDER BY created_at ASC",
+      )
+        .bind(project.id)
+        .all();
+      const rendersByComposition = new Map();
+      for (const row of renderRows.results) {
+        const list = rendersByComposition.get(row.composition_id) ?? [];
+        list.push(generationView(row));
+        rendersByComposition.set(row.composition_id, list);
+      }
       return json({
         project: await projectSummary(env, project),
         assets: assetRows.map((asset) =>
           assetView(asset, { reuseStillId: reuseById.get(asset.id)?.id ?? null }),
         ),
+        compositions: compositions.results.map((composition) => ({
+          id: composition.id,
+          title: composition.title,
+          createdAt: composition.created_at,
+          updatedAt: composition.updated_at,
+          ...safeJson(composition.spec_json, { shots: [], audioAssetId: null, totalMs: 0 }),
+          renders: rendersByComposition.get(composition.id) ?? [],
+        })),
         generations: generations.results.map((generation) => generationView(generation)),
         recipes: projectRecipes(project.id, recipes.results),
         publications: publications.results.map((publication) => ({
@@ -322,6 +357,47 @@ async function handleApi(request, env, url) {
 
     if (rest === "assets" && method === "POST")
       return uploadAsset(request, env, project);
+
+    if (rest === "compositions" && method === "POST") {
+      const input = await body(request);
+      return json({ composition: await createComposition(env, project, input) }, 201);
+    }
+
+    const compositionEdit = rest && rest.match(/^compositions\/([a-z0-9_]+)$/);
+    if (compositionEdit && method === "PATCH") {
+      const composition = await env.DB.prepare("SELECT * FROM compositions WHERE id=?1 AND project_id=?2")
+        .bind(compositionEdit[1], project.id)
+        .first();
+      if (!composition) throw new HttpError(404, "Composition not found", "not_found");
+      const input = await body(request);
+      return json({ composition: await updateComposition(env, project, composition, input) });
+    }
+
+    const compositionRender = rest && rest.match(/^compositions\/([a-z0-9_]+)\/render$/);
+    if (compositionRender && method === "POST") {
+      const composition = await env.DB.prepare("SELECT * FROM compositions WHERE id=?1 AND project_id=?2")
+        .bind(compositionRender[1], project.id)
+        .first();
+      if (!composition) throw new HttpError(404, "Composition not found", "not_found");
+      const input = await body(request);
+      const created = await createRender(env, project, composition, input);
+      if (!created.created) {
+        const generation =
+          created.generation.status === "admitted"
+            ? await dispatchRender(env, created.generation)
+            : created.generation;
+        return json({ generation: generationView(generation), replayed: true, budget: await budgetSnapshot(env, project.id) });
+      }
+      const generation = await dispatchRender(env, created.generation);
+      return json(
+        {
+          generation: generationView(generation),
+          budget: await budgetSnapshot(env, project.id),
+          estimateMicro: created.generation.cost_estimate_micro,
+        },
+        201,
+      );
+    }
 
     if (rest === "generations" && method === "POST") {
       const input = await body(request);
@@ -586,6 +662,7 @@ function defaultDefaults() {
   return {
     imageModel: "studio-print",
     videoModel: "hailuo-standard",
+    audioModel: "studio-score",
     aspect: "portrait",
     durationSeconds: 6,
   };
@@ -628,18 +705,31 @@ async function uploadAsset(request, env, project) {
 
   const bytes = new Uint8Array(await file.arrayBuffer());
   const sniffed = sniffMedia(bytes, file.type);
-  if (!sniffed.kind) throw new HttpError(415, "Upload a JPEG, PNG or WebP image, or an MP4/WebM video", "unsupported_type");
-  const limit = sniffed.kind === "image" ? MAX_IMAGE_BYTES : MAX_VIDEO_BYTES;
+  if (!sniffed.kind)
+    throw new HttpError(
+      415,
+      "Upload a JPEG, PNG or WebP image, an MP4 or WebM video, or WAV, MP3 or M4A audio",
+      "unsupported_type",
+    );
+  const limit =
+    sniffed.kind === "image" ? MAX_IMAGE_BYTES : sniffed.kind === "audio" ? MAX_AUDIO_BYTES : MAX_VIDEO_BYTES;
   if (bytes.length > limit)
-    throw new HttpError(413, `${sniffed.kind === "image" ? "Images" : "Videos"} must stay under ${limit / 1024 / 1024} MiB`, "too_large");
+    throw new HttpError(413, `${sniffed.kind === "image" ? "Images" : sniffed.kind === "audio" ? "Audio" : "Videos"} must stay under ${limit / 1024 / 1024} MiB`, "too_large");
 
   let size;
   if (sniffed.kind === "image") {
-    size = imageSize(bytes);
-    if (!size.width || !size.height)
+    const image = imageSize(bytes);
+    size = { width: image.width, height: image.height, durationMs: null };
+    if (!image.width || !image.height)
       throw new HttpError(415, "That image could not be read. Try a standard JPEG or PNG.", "unsupported_type");
+  } else if (sniffed.kind === "audio") {
+    const audio = audioInfo(bytes);
+    size = { width: null, height: null, durationMs: audio.durationMs, sampleRate: audio.sampleRate, channels: audio.channels };
+    if (!audio.format)
+      throw new HttpError(415, "That audio could not be read. Try WAV, MP3 or M4A.", "unsupported_type");
   } else {
-    size = videoInfo(bytes);
+    const video = videoInfo(bytes);
+    size = { width: video.width, height: video.height, durationMs: video.durationMs };
   }
 
   const hash = await sha256Hex(bytes);
@@ -653,8 +743,8 @@ async function uploadAsset(request, env, project) {
   const fallbackTitle = String(form.get("title") ?? "").trim() || file.name.replace(/\.[^.]+$/, "").slice(0, 100) || "Untitled";
   try {
     await env.DB.prepare(
-      `INSERT INTO assets(id,project_id,kind,r2_key,mime,bytes,width,height,duration_ms,sha256,title,caption,source,parent_asset_id,created_at,updated_at)
-       VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'upload',?13,?14,?14)`,
+      `INSERT INTO assets(id,project_id,kind,r2_key,mime,bytes,width,height,duration_ms,sample_rate,channels,sha256,title,caption,source,parent_asset_id,created_at,updated_at)
+       VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'upload',?15,?16,?16)`,
     )
       .bind(
         assetId,
@@ -666,6 +756,8 @@ async function uploadAsset(request, env, project) {
         size.width ?? null,
         size.height ?? null,
         size.durationMs ?? null,
+        size.sampleRate ?? null,
+        size.channels ?? null,
         hash,
         text(fallbackTitle, 100, "Title", { required: false }) || "Untitled",
         text(String(form.get("caption") ?? ""), 400, "Caption", { required: false }),
@@ -683,6 +775,41 @@ async function uploadAsset(request, env, project) {
 
 async function handlePublic(request, env, url) {
   const path = url.pathname;
+
+  // Signed, short-lived input for one render job. No session, no listing, no
+  // other asset: the provider can read exactly what this job needs to read.
+  const renderInput = path.match(/^\/render-input\/([a-z0-9_]+)$/);
+  if (renderInput) {
+    if (request.method !== "GET" && request.method !== "HEAD")
+      throw new HttpError(405, "Method not allowed", "method_not_allowed");
+    const assetId = renderInput[1];
+    const projectId = url.searchParams.get("p") ?? "";
+    const valid = await verifyRenderLink(env, {
+      assetId,
+      projectId,
+      expires: url.searchParams.get("e"),
+      signature: url.searchParams.get("s"),
+    });
+    if (!valid) throw new HttpError(403, "This render link is not valid or has expired", "link_expired");
+    const asset = await env.DB.prepare(
+      "SELECT * FROM assets WHERE id=?1 AND project_id=?2 AND deleted_at IS NULL",
+    )
+      .bind(assetId, projectId)
+      .first();
+    if (!asset) throw new HttpError(404, "Not found", "not_found");
+    const object = await env.MEDIA.get(asset.r2_key);
+    if (!object) throw new HttpError(410, "The stored bytes are unavailable", "unavailable");
+    return new Response(request.method === "HEAD" ? null : object.body, {
+      headers: {
+        "content-type": asset.mime,
+        "content-length": String(asset.bytes),
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "default-src 'none'; sandbox",
+      },
+    });
+  }
+
   const publicationMatch = path.match(/^\/p\/([A-Za-z0-9_-]+)(\/poster|\/download|\/media)?$/);
   if (publicationMatch) {
     const [, publicSlug, extra] = publicationMatch;

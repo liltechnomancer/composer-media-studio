@@ -108,6 +108,64 @@ export const models = {
     costPerSecondMicro: 70_000,
     costBasis: "fal.ai review estimate for a five second clip; check current fal pricing before relying on it.",
   },
+  "studio-score": {
+    id: "studio-score",
+    label: "Studio Score",
+    provider: PROVIDER_FAL,
+    endpoint: "fal-ai/stable-audio",
+    kind: "audio",
+    description:
+      "An original 30-second music or atmosphere bed from a written description. Instrumental, generated for this studio.",
+    audio: { mode: "music", maxSeconds: 30 },
+    references: 0,
+    costMicro: 15_000,
+    costBasis:
+      "fal.ai estimate for one 30-second Stable Audio generation; confirm current fal pricing before relying on it.",
+  },
+  "studio-voice": {
+    id: "studio-voice",
+    label: "Studio Voice",
+    provider: PROVIDER_FAL,
+    endpoint: "fal-ai/elevenlabs/tts/eleven-v3",
+    kind: "audio",
+    description:
+      "Spoken narration from your own script, using ElevenLabs' voice model through fal.ai. Use text you wrote or have the rights to.",
+    audio: { mode: "speech", maxChars: 1200 },
+    references: 0,
+    costMicro: 60_000,
+    costBasis:
+      "fal.ai estimate for one short ElevenLabs narration; the fal invoice, not this figure, is authoritative.",
+  },
+  "studio-assembly": {
+    id: "studio-assembly",
+    label: "Studio Assembly",
+    provider: PROVIDER_FAL,
+    endpoint: "fal-ai/ffmpeg-api/compose",
+    kind: "video",
+    render: "assembly",
+    description:
+      "Assemble the ordered shots and an optional audio bed into one bounded, playable export.",
+    aspects: ["assembly"],
+    references: 0,
+    costMicro: 20_000,
+    costBasis:
+      "fal.ai estimate for one bounded ffmpeg composition; confirm current fal pricing before relying on it.",
+  },
+  "studio-social": {
+    id: "studio-social",
+    label: "Studio Social Cut",
+    provider: PROVIDER_FAL,
+    endpoint: "fal-ai/ffmpeg-api/merge-videos",
+    kind: "video",
+    render: "social",
+    description:
+      "Re-frame an assembled result to a 9:16 social format and keep its audio track.",
+    aspects: ["social"],
+    references: 0,
+    costMicro: 20_000,
+    costBasis:
+      "fal.ai estimate for one bounded ffmpeg merge and audio mux; confirm current fal pricing before relying on it.",
+  },
 };
 
 /** Chunked base64 so an 8 MiB reference cannot overflow the argument limit. */
@@ -125,9 +183,11 @@ export function publicModels() {
     label: model.label,
     kind: model.kind,
     description: model.description,
-    aspects: model.aspects,
+    aspects: model.aspects ?? [],
     durations: model.durations ?? null,
     references: model.references,
+    audio: model.audio ?? null,
+    render: model.render ?? null,
     provider:
       model.provider === PROVIDER_CLOUDFLARE
         ? "Cloudflare Workers AI"
@@ -145,7 +205,7 @@ export function getModel(id) {
 }
 
 export function estimateCost(model, settings = {}) {
-  if (model.kind === "image") return model.costMicro;
+  if (model.kind !== "video") return model.costMicro;
   const base = model.durations?.[0] ?? 5;
   const seconds = Number(settings.durationSeconds ?? base);
   if (seconds === base) return model.costMicro;
@@ -175,6 +235,15 @@ export function validateSettings(model, input) {
     if (!model.aspects.includes(aspect))
       throw new HttpError(400, `${model.label} does not support the ${aspect} frame`);
     return { prompt, aspect };
+  }
+
+  if (model.kind === "audio") {
+    if (model.audio.mode === "speech") {
+      if (prompt.length > model.audio.maxChars)
+        throw new HttpError(400, `${model.label} takes up to ${model.audio.maxChars} characters`);
+      return { prompt, durationSeconds: null };
+    }
+    return { prompt, durationSeconds: model.audio.maxSeconds };
   }
 
   const durationSeconds = Number(input.durationSeconds ?? model.durations[0]);
@@ -243,7 +312,17 @@ export async function runImage(env, model, settings, references, signal) {
 }
 
 function falKey(env) {
-  if (!env.FAL_KEY) throw new HttpError(503, "Video generation needs a fal.ai key on this studio", "provider_not_configured");
+  if (!env.FAL_KEY) {
+    // Nothing was sent, so this is a definitive failure rather than an unknown
+    // provider outcome. It releases the reservation instead of holding it.
+    const error = new HttpError(
+      503,
+      "This route needs a fal.ai key on this studio",
+      "provider_not_configured",
+    );
+    error.definitive = true;
+    throw error;
+  }
   return env.FAL_KEY;
 }
 
@@ -348,19 +427,122 @@ export async function cancelVideo(env, generation) {
   return { accepted: response.ok, status: response.status };
 }
 
+/** One place that submits to the fal queue, so audio and render jobs inherit
+ * the same URL validation as video. */
+async function falSubmit(env, endpoint, input) {
+  const response = await fetch(`${FAL_ORIGIN}/${endpoint}`, {
+    method: "POST",
+    headers: {
+      authorization: `Key ${falKey(env)}`,
+      "content-type": "application/json",
+      "x-fal-request-timeout": "120",
+    },
+    body: JSON.stringify(input),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const detail = payload?.detail ?? payload?.error?.message ?? `fal responded ${response.status}`;
+    const definitive = response.status >= 400 && response.status < 500;
+    const error = new HttpError(
+      response.status === 403 ? 402 : 502,
+      `Provider refused the request: ${String(detail).slice(0, 200)}`,
+      response.status === 403 ? "provider_funding" : "provider_error",
+    );
+    error.definitive = definitive;
+    throw error;
+  }
+  if (!payload?.request_id)
+    throw new HttpError(502, "Provider accepted the request without an identifier", "provider_invalid");
+  return {
+    requestId: payload.request_id,
+    statusUrl: checkFalUrl(payload.status_url, "status URL"),
+    responseUrl: checkFalUrl(payload.response_url, "result URL"),
+  };
+}
+
+export async function submitAudio(env, model, settings) {
+  const input =
+    model.audio.mode === "speech"
+      ? {
+          text: settings.prompt,
+          voice: "Aria",
+          stability: 0.5,
+          output_format: "mp3_44100_128",
+          enable_safety_checker: true,
+        }
+      : { prompt: settings.prompt, seconds_total: model.audio.maxSeconds, enable_safety_checker: true };
+  return falSubmit(env, model.endpoint, input);
+}
+
+export async function readAudioResult(env, generation) {
+  const response = await fetch(generation.provider_response_url, {
+    headers: { authorization: `Key ${falKey(env)}` },
+  });
+  if (!response.ok)
+    throw new HttpError(502, `Audio provider result read failed (${response.status})`, "provider_error");
+  const payload = await response.json().catch(() => null);
+  const file = payload?.audio ?? payload?.audio_file;
+  if (!file?.url) throw new HttpError(502, "Audio provider returned no audio", "provider_invalid");
+  return { url: file.url, contentType: file.content_type ?? "audio/mpeg" };
+}
+
+/** Assemble ordered shots plus an optional audio bed in one bounded call. */
+export async function submitAssembly(env, model, tracks) {
+  return falSubmit(env, model.endpoint, { tracks });
+}
+
+/** Re-frame the assembled master to 9:16, then keep its audio. Two bounded
+ * provider steps in one durable job; the second never runs without the first. */
+export async function submitSocialReframe(env, model, masterUrl) {
+  return falSubmit(env, model.endpoint, {
+    video_urls: [masterUrl],
+    resolution: "portrait_16_9",
+  });
+}
+
+export async function submitSocialAudio(env, model, videoUrl, audioUrl) {
+  return falSubmit(env, "fal-ai/ffmpeg-api/merge-audio-video", {
+    video_url: videoUrl,
+    audio_url: audioUrl,
+  });
+}
+
+export async function readRenderResult(env, generation) {
+  const response = await fetch(generation.provider_response_url, {
+    headers: { authorization: `Key ${falKey(env)}` },
+  });
+  if (!response.ok)
+    throw new HttpError(502, `Render provider result read failed (${response.status})`, "provider_error");
+  const payload = await response.json().catch(() => null);
+  const file =
+    payload?.video ??
+    (typeof payload?.video_url === "string"
+      ? { url: payload.video_url, content_type: "video/mp4" }
+      : null);
+  if (!file?.url) throw new HttpError(502, "Render provider returned no video", "provider_invalid");
+  return {
+    url: file.url,
+    contentType: file.content_type ?? "video/mp4",
+    thumbnailUrl: typeof payload?.thumbnail_url === "string" ? payload.thumbnail_url : null,
+  };
+}
 const ALLOWED_MEDIA_HOST = /(^|\.)fal\.media$/;
 
-export async function downloadVideo(env, url) {
+/** Copy a provider result into owned storage. Only fal's own media host is
+ * trusted, and the result must fit the app's own output limit. */
+export async function downloadMedia(env, url, { maxBytes = 64 * 1024 * 1024 } = {}) {
   const parsed = new URL(url);
   if (parsed.protocol !== "https:" || !ALLOWED_MEDIA_HOST.test(parsed.hostname))
-    throw new HttpError(502, "Video provider returned an untrusted download address", "provider_invalid");
+    throw new HttpError(502, "Provider returned an untrusted download address", "provider_invalid");
   const response = await fetch(parsed.href, { redirect: "follow" });
-  if (!response.ok) throw new HttpError(502, `Video download failed (${response.status})`, "provider_error");
+  if (!response.ok) throw new HttpError(502, `Provider download failed (${response.status})`, "provider_error");
   const length = Number(response.headers.get("content-length") ?? 0);
-  if (length > 64 * 1024 * 1024)
-    throw new HttpError(502, "Video exceeds the 64 MiB owned-output limit", "output_too_large");
+  if (length > maxBytes)
+    throw new HttpError(502, `Provider output exceeds the ${Math.round(maxBytes / 1024 / 1024)} MiB owned-output limit`, "output_too_large");
   const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.length > 64 * 1024 * 1024)
-    throw new HttpError(502, "Video exceeds the 64 MiB owned-output limit", "output_too_large");
-  return { bytes, contentType: response.headers.get("content-type") ?? "video/mp4" };
+  if (bytes.length > maxBytes)
+    throw new HttpError(502, `Provider output exceeds the ${Math.round(maxBytes / 1024 / 1024)} MiB owned-output limit`, "output_too_large");
+  return { bytes, contentType: response.headers.get("content-type") ?? "application/octet-stream" };
 }
+
+export const downloadVideo = (env, url) => downloadMedia(env, url);

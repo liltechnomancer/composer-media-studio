@@ -65,9 +65,9 @@ ${extra}
 
 export function shell({ revision }) {
   return `${head({
-    title: "Media Studio — make and organise images and video",
+    title: "Media Studio — make, assemble and keep images, video and sound",
     description:
-      "An independent studio for uploads, image generation, reference variations, image-to-video, creative recipes and deliberate publishing.",
+      "An independent studio for uploads, image generation, reference variations, image-to-video, generated music and narration, bounded assembly, saved compositions and deliberate publishing.",
     extra: `<meta name="robots" content="noindex">`,
   })}
 <body>
@@ -160,11 +160,12 @@ export function publicPage({
 }) {
   const url = `${origin}/p/${slug}`;
   const isVideo = kind === "video";
+  const isAudio = kind === "audio";
   const dimensions = width && height ? `${width} × ${height}` : null;
   const duration = durationMs ? `${(durationMs / 1000).toFixed(1)}s` : null;
   const size = bytes ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : null;
   const facts = [dimensions, duration, size, mime].filter(Boolean).join(" · ");
-  const ogImage = isVideo ? poster : media;
+  const ogImage = isVideo ? poster : isAudio ? null : media;
   const ogImageUrl = ogImage ? `${origin}${ogImage}` : null;
   const ogImageMime = isVideo ? posterMime : mime;
   const ogImageWidth = isVideo ? posterWidth : width;
@@ -189,7 +190,7 @@ export function publicPage({
     imageWidth: ogImageWidth,
     imageHeight: ogImageHeight,
     url,
-    kind: isVideo ? "video.other" : "website",
+    kind: isVideo ? "video.other" : isAudio ? "music.song" : "website",
     extra: isVideo
       ? `<meta property="og:video" content="${escapeHtml(origin + media)}"><meta property="og:video:type" content="${escapeHtml(mime)}">${durationMs ? `<meta property="video:duration" content="${Math.round(durationMs / 1000)}">` : ""}`
       : "",
@@ -204,12 +205,14 @@ export function publicPage({
       ${
         isVideo
           ? `<video controls playsinline preload="metadata" ${poster ? `poster="${escapeHtml(poster)}"` : ""} aria-label="${escapeHtml(title)}"><source src="${escapeHtml(media)}" type="${escapeHtml(mime)}">Your browser cannot play this video. <a href="${escapeHtml(download)}">Download it instead</a>.</video>`
-          : `<img src="${escapeHtml(media)}" alt="${escapeHtml(title)}" ${width ? `width="${width}" height="${height}"` : ""} decoding="async">`
+          : isAudio
+            ? `<audio controls preload="metadata" aria-label="${escapeHtml(title)}" style="width:100%"><source src="${escapeHtml(media)}" type="${escapeHtml(mime)}">Your browser cannot play this audio. <a href="${escapeHtml(download)}">Download it instead</a>.</audio>`
+            : `<img src="${escapeHtml(media)}" alt="${escapeHtml(title)}" ${width ? `width="${width}" height="${height}"` : ""} decoding="async">`
       }
     </div>
     <figcaption class="caption">
       <span>${escapeHtml(facts)}</span>
-      <a href="${escapeHtml(download)}" download>Download ${isVideo ? "video" : "image"}</a>
+      <a href="${escapeHtml(download)}" download>Download ${isVideo ? "video" : isAudio ? "audio" : "image"}</a>
     </figcaption>
   </figure>
   <p class="small">A deliberately published piece. Private projects, other media and prompts stay in the studio. Withdrawing this page stops new visits here; copies someone already downloaded cannot be recalled.</p>
@@ -250,14 +253,16 @@ export function helpPage() {
   <p class="lede">A plain account of what is stored, what a model costs, and what the studio can honestly confirm.</p>
 
   <h2>Without an AI account</h2>
-  <p>Uploads, project collections, search and filters, the viewer, renaming, downloads, deletion, creative references, export and public pages all work without any model provider. Nothing on those paths calls a model or spends money.</p>
-  <p>Uploads accept JPEG, PNG and WebP images up to 32&nbsp;MB, and MP4 or WebM video up to 64&nbsp;MB. The studio checks the actual bytes and records the real dimensions. A reference image for generation is capped at 8&nbsp;MB.</p>
+  <p>Uploads, project collections, search and filters, the viewer, renaming, downloads, deletion, creative references, storyboards, export and public pages all work without any model provider. Nothing on those paths calls a model or spends money.</p>
+  <p>Uploads accept JPEG, PNG and WebP images and WAV, MP3 or M4A audio up to 32&nbsp;MB, and MP4 or WebM video up to 64&nbsp;MB. The studio checks the actual bytes and records the real dimensions, duration and audio format. A reference image for generation is capped at 8&nbsp;MB. Rendering a storyboard is the one path that needs a provider, because it needs a renderer.</p>
 
   <h2>Generation</h2>
   <p>Generation uses the provider configured on this studio, not your personal account elsewhere:</p>
   <ul>
     <li><strong>Images</strong> run on Cloudflare Workers AI on this studio's own Cloudflare account. Studio Quick and Studio Draft make new stills in square, portrait, landscape or wide frames. Studio Detail takes one selected still as a reference and makes a variation.</li>
     <li><strong>Video</strong> runs on fal.ai through this studio's own key. Animate a still sends the selected image and a motion prompt to an asynchronous image-to-video job, then copies the finished MP4 into this studio's storage.</li>
+    <li><strong>Sound</strong> runs on fal.ai too. Studio Score makes a 30-second instrumental bed; Studio Voice narrates text you supply. Both come back as audio assets with their real duration, sample rate and channel count, and both can be published or used as a storyboard's audio track.</li>
+    <li><strong>Assembly</strong> is a bounded render, not an unbounded transcode. The studio signs short-lived read links for the participating clips and audio, asks the render provider for one composition of up to sixty seconds, then copies the assembled MP4 into this studio's storage. The composition stays editable; rendering again is a new, separately estimated request and keeps the earlier result.</li>
   </ul>
   <p>Every request shows an estimate before you confirm it. Estimates are not invoices. The monthly allowance is enforced by one atomic check across the whole studio, so two simultaneous requests cannot oversubscribe it.</p>
 
@@ -283,7 +288,7 @@ export function helpPage() {
     <li>Create a D1 database and an R2 bucket, then apply <code>migrations/0001.sql</code>.</li>
     <li>Bind them as <code>DB</code> and <code>MEDIA</code>, and add the Workers AI binding <code>AI</code>.</li>
     <li>Set <code>OWNER_PASSPHRASE</code> (at least 16 characters) and <code>SESSION_SECRET</code> (at least 32 characters) as Wrangler secrets.</li>
-    <li>Optional video: set <code>FAL_KEY</code> as a Wrangler secret. Without it, image work and the library still function and the studio says video needs a key.</li>
+    <li>Optional video, sound and assembly: set <code>FAL_KEY</code> as a Wrangler secret. Without it, image work and the library still function and the studio says those routes need a key.</li>
     <li>Deploy with a clean pushed <code>main</code>. The guarded deploy runs the focused checks first.</li>
   </ol>
   <p class="small">No App Composer account, licence callback or hosted service is required after deployment.</p>

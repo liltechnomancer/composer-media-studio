@@ -4,9 +4,6 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-
 import {
   createGeneration,
   cancelGeneration,
@@ -17,84 +14,7 @@ import {
 } from "../src/lib/jobs.mjs";
 import { getModel, validateSettings, publicModels, estimateCost } from "../src/lib/providers.mjs";
 import { imageSize, videoInfo, sniffMedia } from "../src/lib/util.mjs";
-
-const migration = readFileSync(new URL("../migrations/0001.sql", import.meta.url), "utf8");
-
-class SqliteD1 {
-  constructor() {
-    this.db = new DatabaseSync(":memory:");
-    this.db.exec(migration);
-  }
-  prepare(sql) {
-    const statement = this.db.prepare(sql);
-    return {
-      bind: (...args) => ({
-        first: async () => statement.get(...args) ?? null,
-        all: async () => ({ results: statement.all(...args) }),
-        run: async () => statement.run(...args),
-      }),
-      first: async () => statement.get() ?? null,
-      all: async () => ({ results: statement.all() }),
-      run: async () => statement.run(),
-    };
-  }
-  exec(sql) {
-    this.db.exec(sql);
-  }
-}
-
-class FakeBucket {
-  constructor() {
-    this.objects = new Map();
-  }
-  async put(key, bytes) {
-    this.objects.set(key, new Uint8Array(bytes));
-  }
-  async get(key) {
-    const bytes = this.objects.get(key);
-    if (!bytes) return null;
-    return {
-      arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
-    };
-  }
-  async delete(key) {
-    this.objects.delete(key);
-  }
-}
-
-const PNG_1x1 = Uint8Array.from(
-  Buffer.from(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-    "base64",
-  ),
-);
-
-function jpeg(width, height) {
-  const bytes = new Uint8Array(24);
-  bytes.set([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x20, 0x03], 0);
-  const view = new DataView(bytes.buffer);
-  view.setUint16(7, height);
-  view.setUint16(9, width);
-  bytes.set([0xff, 0xd9], 22);
-  return bytes;
-}
-
-async function setup({ allowance = 5_000_000 } = {}) {
-  const env = {
-    DB: new SqliteD1(),
-    MEDIA: new FakeBucket(),
-    MONTHLY_ALLOWANCE_MICRO: allowance,
-  };
-  const projectId = "prj_test";
-  const timestamp = Date.now();
-  await env.DB.prepare(
-    "INSERT INTO projects(id,name,slug,creative_direction,visibility,defaults_json,created_at,updated_at) VALUES(?1,?2,?3,'','private','{}',?4,?4)",
-  )
-    .bind(projectId, "Test studio", "test-studio", timestamp)
-    .run();
-  const project = await env.DB.prepare("SELECT * FROM projects WHERE id=?1").bind(projectId).first();
-  return { env, project };
-}
+import { PNG_1x1, jpeg, setup } from "./harness.mjs";
 
 function imageRequest(overrides = {}) {
   return {

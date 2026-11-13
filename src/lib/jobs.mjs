@@ -9,18 +9,27 @@
 // - a deleted job or asset is never resurrected by a late completion.
 
 import {
+  downloadMedia,
   downloadVideo,
   estimateCost,
   getModel,
+  readAudioResult,
+  readRenderResult,
   readVideoResult,
   readVideoStatus,
   runImage,
+  submitAssembly,
+  submitAudio,
+  submitSocialAudio,
+  submitSocialReframe,
   submitVideo,
   validateSettings,
   cancelVideo,
 } from "./providers.mjs";
 import { builtinRecipe } from "./recipes.mjs";
+import { signRenderLink } from "./render-links.mjs";
 import {
+  audioInfo,
   extensionFor,
   HttpError,
   id,
@@ -31,6 +40,7 @@ import {
   safeJson,
   sha256Hex,
   sniffMedia,
+  text,
   videoInfo,
 } from "./util.mjs";
 
@@ -250,6 +260,20 @@ export async function dispatchGeneration(env, generation) {
     }
   }
 
+  if (model.kind === "audio") {
+    try {
+      const submitted = await submitAudio(env, model, request);
+      await env.DB.prepare(
+        "UPDATE generations SET status='submitted',provider_request_id=?2,provider_status_url=?3,provider_response_url=?4,submitted_at=?5,updated_at=?5 WHERE id=?1 AND status='submitting'",
+      )
+        .bind(generation.id, submitted.requestId, submitted.statusUrl, submitted.responseUrl, now())
+        .run();
+      return loadGeneration(env, generation.id);
+    } catch (error) {
+      return failGeneration(env, generation, error, { dispatched: true });
+    }
+  }
+
   try {
     const submitted = await submitVideo(env, model, request, reference);
     await env.DB.prepare(
@@ -318,26 +342,36 @@ export async function saveGeneration(env, generation, bytes, format) {
   const assetId = id("asset");
   const assetKey = `projects/${generation.project_id}/assets/${assetId}/original.${extension}`;
   await env.MEDIA.put(assetKey, bytes, { httpMetadata: { contentType: mime } });
-  const size = mime.startsWith("video/") ? videoInfo(bytes) : imageSize(bytes);
+  const kind = kindForMime(mime);
+  const size = sizeForBytes(mime, bytes);
+  const source = getModel(fresh.model)?.render ? "assembled" : "generated";
   const timestamp = now();
   try {
     await env.DB.prepare(
-      `INSERT INTO assets(id,project_id,kind,r2_key,mime,bytes,width,height,duration_ms,sha256,title,caption,source,parent_asset_id,generation_id,created_at,updated_at)
-       VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'generated',?13,?14,?15,?15)`,
+      `INSERT INTO assets(id,project_id,kind,r2_key,mime,bytes,width,height,duration_ms,sample_rate,channels,sha256,title,caption,source,parent_asset_id,generation_id,created_at,updated_at)
+       VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?18)`,
     )
       .bind(
         assetId,
         generation.project_id,
-        mime.startsWith("video/") ? "video" : "image",
+        kind,
         assetKey,
         mime,
         bytes.length,
         size.width ?? null,
         size.height ?? null,
         size.durationMs ?? null,
+        size.sampleRate ?? null,
+        size.channels ?? null,
         hash,
-        builtinRecipe(request.recipeId)?.title ?? (mime.startsWith("video/") ? "Generated clip" : "Generated still"),
+        fresh.model === "studio-assembly"
+          ? text(request.title ?? "", 100, "Title", { required: false }) || "Assembled cut"
+          : fresh.model === "studio-social"
+            ? "9:16 social cut"
+            : builtinRecipe(request.recipeId)?.title ??
+              (kind === "audio" ? "Generated audio" : kind === "video" ? "Generated clip" : "Generated still"),
         String(request.prompt ?? "").slice(0, 400),
+        source,
         request.parentAssetId ?? null,
         generation.id,
         timestamp,
@@ -364,10 +398,29 @@ export async function saveGeneration(env, generation, bytes, format) {
 
 function mimeFor(format, bytes) {
   if (format === "mp4") return "video/mp4";
+  if (format === "mp3") return "audio/mpeg";
+  if (format === "wav") return "audio/wav";
+  if (format === "m4a") return "audio/mp4";
   if (format === "png") return "image/png";
   if (format === "webp") return "image/webp";
   const sniffed = sniffMedia(bytes, "image/jpeg");
   return sniffed.kind === "image" ? sniffed.mime : "image/jpeg";
+}
+
+function kindForMime(mime) {
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+  return "image";
+}
+
+function sizeForBytes(mime, bytes) {
+  if (mime.startsWith("video/")) return videoInfo(bytes);
+  if (mime.startsWith("audio/")) {
+    const info = audioInfo(bytes);
+    return { width: null, height: null, durationMs: info.durationMs, sampleRate: info.sampleRate, channels: info.channels };
+  }
+  const size = imageSize(bytes);
+  return { width: size.width, height: size.height, durationMs: null };
 }
 
 /** Advance one asynchronous job. Safe to call repeatedly from polling or cron. */
@@ -385,7 +438,7 @@ export async function advanceGeneration(env, generation) {
     const stored = await env.MEDIA.get(fresh.retained_key);
     if (stored) {
       const bytes = new Uint8Array(await stored.arrayBuffer());
-      return saveGeneration(env, fresh, bytes, fresh.retained_mime?.includes("mp4") ? "mp4" : "jpeg");
+      return saveGeneration(env, fresh, bytes, formatForMime(fresh.retained_mime));
     }
     return fresh;
   }
@@ -416,7 +469,7 @@ export async function advanceGeneration(env, generation) {
   }
 
   const providerState = status.status.toUpperCase();
-  if (providerState === "COMPLETED") return completeVideo(env, fresh, status);
+  if (providerState === "COMPLETED") return completeJob(env, fresh, status);
   if (providerState === "CANCELLED" || providerState === "CANCELED") {
     await env.DB.prepare("UPDATE generations SET status='cancelled',cancelled_at=?2,updated_at=?2 WHERE id=?1")
       .bind(fresh.id, now())
@@ -439,7 +492,19 @@ export async function advanceGeneration(env, generation) {
   return loadGeneration(env, fresh.id);
 }
 
-async function completeVideo(env, generation, status) {
+function formatForMime(mime) {
+  if (!mime) return "jpeg";
+  if (mime.includes("mp4")) return "mp4";
+  if (mime.includes("mpeg")) return "mp3";
+  if (mime.includes("wav")) return "wav";
+  if (mime.includes("png")) return "png";
+  if (mime.includes("webp")) return "webp";
+  return "jpeg";
+}
+
+/** Read the finished provider result, copy its bytes, then save. Model-specific
+ * because audio, stills and renders return different result shapes. */
+async function completeJob(env, generation, status) {
   if (generation.status === "cancel_requested") {
     // Completion won the race. Report what happened instead of pretending it cancelled.
     await env.DB.prepare("UPDATE generations SET error_code='completed_before_cancel',updated_at=?2 WHERE id=?1")
@@ -449,25 +514,67 @@ async function completeVideo(env, generation, status) {
   await env.DB.prepare("UPDATE generations SET status='provider_complete',updated_at=?2 WHERE id=?1")
     .bind(generation.id, now())
     .run();
+
+  const model = getModel(generation.model);
+  const request = safeJson(generation.request_json, {});
+  const providerGeneration = { ...generation, provider_response_url: status.responseUrl };
+
   let result;
   try {
-    result = await readVideoResult(env, { ...generation, provider_response_url: status.responseUrl });
+    if (model.render === "social" && Number(request.renderStep ?? 1) === 1) {
+      const reframed = await readRenderResult(env, providerGeneration);
+      const master = await loadAssetRow(env, generation.project_id, request.masterAssetId);
+      if (!master) throw new HttpError(409, "The assembled master is no longer available", "master_unavailable");
+      const masterUrl = await signRenderLink(env, {
+        assetId: master.id,
+        projectId: generation.project_id,
+      });
+      const second = await submitSocialAudio(env, model, reframed.url, masterUrl);
+      await env.DB.prepare(
+        "UPDATE generations SET status='submitted',provider_request_id=?2,provider_status_url=?3,provider_response_url=?4,request_json=?5,submitted_at=?6,updated_at=?6 WHERE id=?1",
+      )
+        .bind(
+          generation.id,
+          second.requestId,
+          second.statusUrl,
+          second.responseUrl,
+          JSON.stringify({ ...request, renderStep: 2 }),
+          now(),
+        )
+        .run();
+      return loadGeneration(env, generation.id);
+    }
+    result = model.kind === "audio" ? await readAudioResult(env, providerGeneration) : await readRenderResult(env, providerGeneration);
   } catch (error) {
     await env.DB.prepare("UPDATE generations SET error_code='result_unavailable',error_detail=?2,updated_at=?3 WHERE id=?1")
       .bind(generation.id, String(error.message).slice(0, 200), now())
       .run();
     return loadGeneration(env, generation.id);
   }
+
   let download;
   try {
-    download = await downloadVideo(env, result.url);
+    download = await downloadMedia(env, result.url);
   } catch (error) {
     await env.DB.prepare("UPDATE generations SET error_code='download_failed',error_detail=?2,updated_at=?3 WHERE id=?1")
       .bind(generation.id, String(error.message).slice(0, 200), now())
       .run();
     return loadGeneration(env, generation.id);
   }
-  return saveGeneration(env, generation, download.bytes, "mp4");
+  const format =
+    model.kind === "audio"
+      ? download.contentType.includes("wav")
+        ? "wav"
+        : "mp3"
+      : "mp4";
+  return saveGeneration(env, generation, download.bytes, format);
+}
+
+async function loadAssetRow(env, projectId, assetId) {
+  if (!assetId) return null;
+  return env.DB.prepare("SELECT * FROM assets WHERE id=?1 AND project_id=?2 AND deleted_at IS NULL")
+    .bind(assetId, projectId)
+    .first();
 }
 
 export async function cancelGeneration(env, generation) {
@@ -526,4 +633,221 @@ export async function pendingGenerations(env, limit = 8) {
     .bind(limit)
     .all();
   return results;
+}
+
+export const MAX_SHOTS = 6;
+export const MAX_SHOT_MS = 10_500;
+export const MAX_TOTAL_MS = 60_000;
+
+/** Validate an editable composition against the project's own saved clips. */
+export async function buildCompositionSpec(env, project, input) {
+  const title = text(input.title, 80, "Composition title");
+  const shots = Array.isArray(input.shots) ? input.shots : [];
+  if (shots.length < 2)
+    throw new HttpError(400, "Choose at least two saved clips to assemble", "invalid_shots");
+  if (shots.length > MAX_SHOTS)
+    throw new HttpError(400, `A composition takes up to ${MAX_SHOTS} shots`, "invalid_shots");
+
+  const ids = [];
+  const manifest = [];
+  let totalMs = 0;
+  for (const shot of shots) {
+    const assetId = String(shot?.assetId ?? "");
+    if (!/^[a-z0-9_]{4,80}$/i.test(assetId) || ids.includes(assetId))
+      throw new HttpError(400, "Each shot must be one saved clip, used once", "invalid_shots");
+    const asset = await loadAssetRow(env, project.id, assetId);
+    if (!asset || asset.kind !== "video")
+      throw new HttpError(400, "Every shot must be a saved clip in this project", "invalid_shots");
+    const durationMs = Number(asset.duration_ms);
+    if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > MAX_SHOT_MS)
+      throw new HttpError(
+        400,
+        `${asset.title || "That clip"} is not a bounded clip the studio can assemble`,
+        "invalid_shots",
+      );
+    ids.push(assetId);
+    manifest.push({ assetId, title: asset.title || "Clip", durationMs });
+    totalMs += durationMs;
+  }
+  if (totalMs > MAX_TOTAL_MS)
+    throw new HttpError(400, `Keep the assembled result under ${MAX_TOTAL_MS / 1000} seconds`, "invalid_shots");
+
+  let audioAssetId = null;
+  if (input.audioAssetId) {
+    const audio = await loadAssetRow(env, project.id, String(input.audioAssetId));
+    if (!audio || audio.kind !== "audio")
+      throw new HttpError(400, "Choose a saved audio track from this project", "invalid_audio");
+    audioAssetId = audio.id;
+  }
+
+  return { title, shots: manifest, audioAssetId, totalMs };
+}
+
+export async function createComposition(env, project, input) {
+  const spec = await buildCompositionSpec(env, project, input);
+  const compositionId = id("cmp");
+  const timestamp = now();
+  await env.DB.prepare(
+    "INSERT INTO compositions(id,project_id,title,spec_json,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?5)",
+  )
+    .bind(compositionId, project.id, spec.title, JSON.stringify(spec), timestamp)
+    .run();
+  return { id: compositionId, projectId: project.id, ...spec, createdAt: timestamp };
+}
+
+/** Editing keeps the composition id, so earlier renders still point at the cut
+ * they were made from and the manifest is never rewritten retroactively. */
+export async function updateComposition(env, project, composition, input) {
+  const spec = await buildCompositionSpec(env, project, input);
+  await env.DB.prepare("UPDATE compositions SET title=?2,spec_json=?3,updated_at=?4 WHERE id=?1 AND project_id=?5")
+    .bind(composition.id, spec.title, JSON.stringify(spec), now(), project.id)
+    .run();
+  const fresh = await env.DB.prepare("SELECT * FROM compositions WHERE id=?1").bind(composition.id).first();
+  return {
+    id: fresh.id,
+    projectId: fresh.project_id,
+    title: fresh.title,
+    createdAt: fresh.created_at,
+    updatedAt: fresh.updated_at,
+    ...safeJson(fresh.spec_json, {}),
+  };
+}
+
+/** Create one durable render job for a saved composition. The manifest is
+ * copied into the job, so a later edit never rewrites what was rendered. */
+export async function createRender(env, project, composition, input) {
+  const model = getModel(input.model ?? "studio-assembly");
+  if (!model.render) throw new HttpError(400, "Choose a supported render", "invalid_model");
+  const clientRequestId = String(input.clientRequestId ?? "").slice(0, 80);
+  if (!/^[a-zA-Z0-9_-]{8,80}$/.test(clientRequestId))
+    throw new HttpError(400, "A client request id is required", "invalid_request");
+
+  const existing = await env.DB.prepare(
+    "SELECT * FROM generations WHERE project_id=?1 AND client_request_id=?2",
+  )
+    .bind(project.id, clientRequestId)
+    .first();
+  if (existing) return { generation: existing, created: false };
+
+  const spec = safeJson(composition.spec_json, { shots: [], audioAssetId: null, totalMs: 0 });
+  if (model.render === "social") {
+    const masterAssetId = String(input.masterAssetId ?? "");
+    const master = await loadAssetRow(env, project.id, masterAssetId);
+    if (!master || master.kind !== "video" || master.source !== "assembled")
+      throw new HttpError(400, "Choose an assembled result to make a social cut", "invalid_master");
+    spec.masterAssetId = master.id;
+  }
+
+  const cost = model.costMicro;
+  const generationId = id("gen");
+  const timestamp = now();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO generations(id,project_id,composition_id,client_request_id,kind,recipe_id,provider,model,request_json,status,cost_estimate_micro,cost_reserved_micro,created_at,updated_at)
+       VALUES(?1,?2,?3,?4,'video','composition',?5,?6,?7,'admitted',?8,?9,?10,?10)`,
+    )
+      .bind(
+        generationId,
+        project.id,
+        composition.id,
+        clientRequestId,
+        model.provider,
+        model.id,
+        JSON.stringify({
+          compositionId: composition.id,
+          title: composition.title,
+          shots: spec.shots,
+          audioAssetId: spec.audioAssetId ?? null,
+          totalMs: spec.totalMs,
+          masterAssetId: spec.masterAssetId ?? null,
+          variant: model.render,
+          renderStep: 1,
+        }),
+        cost,
+        cost,
+        timestamp,
+      )
+      .run();
+  } catch (error) {
+    if (String(error.message ?? error).includes("UNIQUE")) {
+      const row = await env.DB.prepare(
+        "SELECT * FROM generations WHERE project_id=?1 AND client_request_id=?2",
+      )
+        .bind(project.id, clientRequestId)
+        .first();
+      if (row) return { generation: row, created: false };
+    }
+    throw error;
+  }
+
+  const generation = await loadGeneration(env, generationId);
+  try {
+    await reserve(env, project.id, cost);
+  } catch (error) {
+    await env.DB.prepare("UPDATE generations SET status='failed',error_code='budget_exhausted',error_detail=?2,updated_at=?3 WHERE id=?1")
+      .bind(generationId, error.message, now())
+      .run();
+    throw error;
+  }
+  return { generation: await loadGeneration(env, generationId), created: true, model };
+}
+
+/** Submit the render. Exported so the worker can dispatch immediately. */
+export async function dispatchRender(env, generation) {
+  const model = getModel(generation.model);
+  const request = safeJson(generation.request_json, {});
+  if (!(await claim(env, generation.id, "admitted", "submitting"))) {
+    return loadGeneration(env, generation.id);
+  }
+
+  try {
+    let submitted;
+    if (model.render === "social") {
+      const master = await loadAssetRow(env, generation.project_id, request.masterAssetId);
+      if (!master) throw new HttpError(409, "The assembled master is no longer available", "master_unavailable");
+      const masterUrl = await signRenderLink(env, {
+        assetId: master.id,
+        projectId: generation.project_id,
+      });
+      submitted = await submitSocialReframe(env, model, masterUrl);
+    } else {
+      const keyframes = [];
+      let cursor = 0;
+      for (const shot of request.shots ?? []) {
+        const asset = await loadAssetRow(env, generation.project_id, shot.assetId);
+        if (!asset) throw new HttpError(409, "A selected shot is no longer in this project", "shot_unavailable");
+        keyframes.push({
+          timestamp: cursor,
+          duration: Number(shot.durationMs),
+          url: await signRenderLink(env, { assetId: asset.id, projectId: generation.project_id }),
+        });
+        cursor += Number(shot.durationMs);
+      }
+      const tracks = [{ id: "visual", type: "video", keyframes }];
+      if (request.audioAssetId) {
+        const audio = await loadAssetRow(env, generation.project_id, request.audioAssetId);
+        if (!audio) throw new HttpError(409, "The selected audio is no longer in this project", "audio_unavailable");
+        tracks.push({
+          id: "audio",
+          type: "audio",
+          keyframes: [
+            {
+              timestamp: 0,
+              duration: cursor,
+              url: await signRenderLink(env, { assetId: audio.id, projectId: generation.project_id }),
+            },
+          ],
+        });
+      }
+      submitted = await submitAssembly(env, model, tracks);
+    }
+    await env.DB.prepare(
+      "UPDATE generations SET status='submitted',provider_request_id=?2,provider_status_url=?3,provider_response_url=?4,submitted_at=?5,updated_at=?5 WHERE id=?1 AND status='submitting'",
+    )
+      .bind(generation.id, submitted.requestId, submitted.statusUrl, submitted.responseUrl, now())
+      .run();
+    return loadGeneration(env, generation.id);
+  } catch (error) {
+    return failGeneration(env, generation, error, { dispatched: true });
+  }
 }

@@ -17,6 +17,7 @@ const state = {
   filter: "all",
   query: "",
   create: null,
+  compose: { shotIds: [], audioAssetId: null, title: "" },
   busy: false,
   polling: null,
 };
@@ -201,6 +202,7 @@ function render() {
     app.innerHTML = projectView();
     attachDropzone();
   }
+  drawWaveforms();
 }
 
 function homeView() {
@@ -255,13 +257,14 @@ function projectView() {
     </div>
     ${budgetStrip(project.budget)}
     <nav class="tabs" aria-label="Studio sections">
-      ${["library", "create", "history", "publish", "settings"]
+      ${["library", "create", "assemble", "history", "publish", "settings"]
         .map((tab) => `<button role="tab" aria-selected="${state.tab === tab}" data-action="tab" data-tab="${tab}">${tab[0].toUpperCase() + tab.slice(1)}${tab === "history" && project.generations.some(isPending) ? " ·" : ""}</button>`)
         .join("")}
     </nav>
     <section role="tabpanel" aria-label="${esc(state.tab)}">
       ${state.tab === "library" ? libraryView() : ""}
       ${state.tab === "create" ? createView() : ""}
+      ${state.tab === "assemble" ? composeView() : ""}
       ${state.tab === "history" ? historyView() : ""}
       ${state.tab === "publish" ? publishView() : ""}
       ${state.tab === "settings" ? settingsView() : ""}
@@ -303,14 +306,14 @@ function libraryView() {
         <label class="sr-only" for="search">Search media</label>
         <input id="search" type="search" placeholder="Search titles, captions, types…" value="${esc(state.query)}" data-input="search" style="min-width:min(320px,60vw)">
         <div class="row" role="group" aria-label="Filter">
-          ${["all", "image", "video"].map((value) => `<button class="quiet" data-action="filter" data-filter="${value}" aria-pressed="${state.filter === value}">${value[0].toUpperCase() + value.slice(1)}</button>`).join("")}
+          ${["all", "image", "video", "audio"].map((value) => `<button class="quiet" data-action="filter" data-filter="${value}" aria-pressed="${state.filter === value}">${value[0].toUpperCase() + value.slice(1)}</button>`).join("")}
         </div>
       </div>
-      <label class="button secondary" for="upload" style="cursor:pointer">Upload media<input id="upload" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm" hidden data-input="upload"></label>
+      <label class="button secondary" for="upload" style="cursor:pointer">Upload media<input id="upload" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/webm,audio/mpeg,audio/wav,audio/mp4,.mp3,.wav,.m4a" hidden data-input="upload"></label>
     </div>
     <div class="dropzone" id="dropzone" style="margin:1rem 0">
       <p style="margin:0"><strong>Drop files here</strong> or use Upload media.</p>
-      <p class="small" style="margin:0.3rem 0 0">JPEG, PNG, WebP, MP4 or WebM. Images up to 32 MB, video up to 64 MB.</p>
+      <p class="small" style="margin:0.3rem 0 0">JPEG, PNG, WebP, MP4, WebM, WAV, MP3 or M4A. Images and audio up to 32 MB, video up to 64 MB.</p>
     </div>
     ${total === 0 ? `<div class="card"><h2>Nothing here yet.</h2><p>Upload a photo or a clip to start the library. You can generate new stills once uploads work.</p><button class="button" data-action="tab" data-tab="create">Make the first image</button></div>` : ""}
     ${total > 0 && assets.length === 0 ? `<p class="notice">No media matches that filter. <button class="quiet" data-action="filter" data-filter="all">Show all</button></p>` : ""}
@@ -323,7 +326,9 @@ function assetCard(asset) {
   const media =
     asset.kind === "video"
       ? `<video src="${esc(asset.file)}" preload="metadata" muted playsinline aria-label="${esc(asset.title)}"></video>`
-      : `<img src="${esc(asset.file)}" alt="${esc(asset.title)}" loading="lazy" decoding="async">`;
+      : asset.kind === "audio"
+        ? `<span class="audio-card"><canvas width="240" height="64" data-waveform="${esc(asset.file)}" aria-hidden="true"></canvas><span class="audio-time">${asset.durationMs ? (asset.durationMs / 1000).toFixed(1) + "s" : "audio"}</span></span>`
+        : `<img src="${esc(asset.file)}" alt="${esc(asset.title)}" loading="lazy" decoding="async">`;
   return `<article class="asset">
     <button class="thumb" data-action="open-asset" data-id="${esc(asset.id)}" aria-label="Open ${esc(asset.title)}">${media}<span class="badge">${esc(asset.kind)}</span></button>
     <div class="meta">
@@ -352,6 +357,7 @@ function createView() {
         <div class="row" style="margin-bottom:0.8rem" role="group" aria-label="Media kind">
           <button class="secondary" data-action="kind" data-kind="image" aria-pressed="${create.kind === "image"}">Create image</button>
           <button class="secondary" data-action="kind" data-kind="video" aria-pressed="${create.kind === "video"}">Animate a still</button>
+          <button class="secondary" data-action="kind" data-kind="audio" aria-pressed="${create.kind === "audio"}">Make sound</button>
         </div>
         <div class="recipe-grid">
           ${recipes.map((item) => `<button class="recipe" data-action="recipe" data-slug="${esc(item.slug)}" aria-pressed="${create.recipeSlug === item.slug}"><strong>${esc(item.title)}</strong><span>${esc(item.description)}</span><span class="small">${esc(item.kind === "video" ? "Image → video" : "Still image")}</span></button>`).join("")}
@@ -367,9 +373,10 @@ function createView() {
       <div class="card">
         <p class="eyebrow">2 · Direct the work</p>
         ${recipe ? recipeControls(recipe, create) : ""}
-        <label style="margin-top:0.7rem">Prompt
+        <label style="margin-top:0.7rem">${model?.kind === "audio" ? (model.audio?.mode === "speech" ? "Narration script" : "Describe the sound") : "Prompt"}
           <textarea data-input="prompt" maxlength="1800" rows="6">${esc(create.prompt)}</textarea>
         </label>
+        ${model?.kind === "audio" ? `<p class="small" style="margin:0.3rem 0 0">${model.audio?.mode === "speech" ? "Use words you wrote or have the rights to. Narration is generated once and saved as audio you can publish or assemble." : "Instrumental music or atmosphere. The clip is 30 seconds and is saved as an audio asset with its duration and provenance."}</p>` : ""}
         ${model?.kind === "image" ? `<label style="margin-top:0.6rem">Frame
           <select data-input="aspect">${model.aspects.map((aspect) => `<option value="${esc(aspect)}" ${create.aspect === aspect ? "selected" : ""}>${esc(aspect === "square" && model.references > 0 ? "Square variation" : aspect)}</option>`).join("")}</select>
         </label>` : ""}
@@ -386,9 +393,9 @@ function createView() {
       <div class="spread">
         <div>
           <p class="eyebrow" style="margin-bottom:0.2rem">3 · Review and submit</p>
-          <p class="small" style="margin:0">${esc(model?.label ?? "No model")} · ${create.kind === "video" ? `${esc(String(create.durationSeconds))}s` : esc(create.aspect)} · estimated <strong>${money(estimate())}</strong></p>
+          <p class="small" style="margin:0">${esc(model?.label ?? "No model")} · ${create.kind === "video" ? `${esc(String(create.durationSeconds))}s` : create.kind === "audio" ? (model?.audio?.mode === "speech" ? "narration" : "30s") : esc(create.aspect)} · estimated <strong>${money(estimate())}</strong></p>
         </div>
-        <button class="button" data-action="submit-create" ${needsReference && !create.referenceAssetId ? "disabled" : ""}>${create.kind === "video" ? "Animate this still" : "Create image"} · ${money(estimate())}</button>
+        <button class="button" data-action="submit-create" ${needsReference && !create.referenceAssetId ? "disabled" : ""}>${create.kind === "video" ? "Animate this still" : create.kind === "audio" ? "Generate sound" : "Create image"} · ${money(estimate())}</button>
       </div>
       <p class="small" style="margin:0.6rem 0 0">Each submit starts one new request. A repeat with the same request id is replayed, never charged twice. Video runs asynchronously; you can leave this page and come back.</p>
     </div>`;
@@ -409,6 +416,105 @@ function recipeControls(recipe, create) {
       </label>`;
     })
     .join("");
+}
+
+function composeView() {
+  const project = state.project;
+  const compose = state.compose;
+  const clips = project.assets.filter((asset) => asset.kind === "video");
+  const audio = project.assets.filter((asset) => asset.kind === "audio");
+  const chosen = compose.shotIds.map((shotId) => clips.find((asset) => asset.id === shotId)).filter(Boolean);
+  const totalMs = chosen.reduce((sum, asset) => sum + (asset.durationMs || 0), 0);
+  const compositions = project.compositions ?? [];
+  const overLimit = totalMs > 60000;
+  return `
+    <div class="spread"><h2 style="margin:0">Storyboard and assembly</h2><span class="small">${chosen.length} shot${chosen.length === 1 ? "" : "s"} · ${(totalMs / 1000).toFixed(1)}s assembled</span></div>
+    <p class="small">Order saved clips, add one audio bed, then render a bounded export. The composition stays editable; rendering again creates a new result and keeps the earlier one.</p>
+    <div class="grid two" style="margin-top:1rem">
+      <div class="card stack">
+        <p class="eyebrow">The cut</p>
+        <label>Title<input data-compose="title" maxlength="80" value="${esc(compose.title)}" placeholder="Field notes, cut one"></label>
+        <div>
+          <p class="small" style="margin:0 0 0.4rem"><strong>Shots in order</strong></p>
+          ${chosen.length === 0 ? `<p class="small" style="margin:0">Add at least two saved clips.</p>` : ""}
+          <ol class="shot-list">
+            ${chosen.map((asset, index) => `<li>
+              <span class="shot-index">${index + 1}</span>
+              <span class="shot-title">${esc(asset.title)}<br><span class="small">${((asset.durationMs || 0) / 1000).toFixed(1)}s · ${asset.width}×${asset.height}</span></span>
+              <span class="row">
+                <button class="quiet" data-action="compose-up" data-id="${esc(asset.id)}" aria-label="Move ${esc(asset.title)} earlier" ${index === 0 ? "disabled" : ""}>↑</button>
+                <button class="quiet" data-action="compose-down" data-id="${esc(asset.id)}" aria-label="Move ${esc(asset.title)} later" ${index === chosen.length - 1 ? "disabled" : ""}>↓</button>
+                <button class="quiet" data-action="compose-remove" data-id="${esc(asset.id)}">Remove</button>
+              </span>
+            </li>`).join("")}
+          </ol>
+        </div>
+        <label>Audio bed
+          <select data-compose="audio">
+            <option value="">No audio</option>
+            ${audio.map((asset) => `<option value="${esc(asset.id)}" ${compose.audioAssetId === asset.id ? "selected" : ""}>${esc(asset.title)} · ${asset.durationMs ? (asset.durationMs / 1000).toFixed(0) + "s" : "audio"}</option>`).join("")}
+          </select>
+        </label>
+        ${audio.length === 0 ? `<p class="small" style="margin:0">Upload or generate sound in Create to add a bed.</p>` : ""}
+        <button class="button" data-action="compose-save" ${chosen.length < 2 || overLimit ? "disabled" : ""}>Save storyboard</button>
+        ${overLimit ? `<p class="small" style="margin:0;color:var(--bad)">Keep the cut under 60 seconds to stay inside the bounded render.</p>` : ""}
+      </div>
+      <div class="card stack">
+        <p class="eyebrow">Saved clips</p>
+        ${clips.length === 0 ? `<p class="small" style="margin:0">No clips yet. Animate a still or upload an MP4 first.</p>` : ""}
+        <ul class="clip-picker">
+          ${clips.map((asset) => {
+            const used = compose.shotIds.includes(asset.id);
+            return `<li><span>${esc(asset.title)} <span class="small">${((asset.durationMs || 0) / 1000).toFixed(1)}s</span></span>
+              <button class="${used ? "quiet" : "secondary"}" data-action="${used ? "compose-remove" : "compose-add"}" data-id="${esc(asset.id)}">${used ? "Added" : "Add shot"}</button></li>`;
+          }).join("")}
+        </ul>
+      </div>
+    </div>
+    <h3 style="margin-top:1.6rem">Saved storyboards</h3>
+    ${compositions.length === 0 ? `<div class="card"><p style="margin:0">No storyboard saved yet.</p></div>` : ""}
+    <div class="stack">
+      ${compositions.map((composition) => compositionCard(composition)).join("")}
+    </div>`;
+}
+
+function compositionCard(composition) {
+  const renders = state.project.generations.filter((generation) => generation.compositionId === composition.id);
+  const master = renders.filter((generation) => generation.variant === "assembly" && generation.status === "saved" && generation.assetId).at(-1);
+  const social = renders.filter((generation) => generation.variant === "social");
+  const pending = renders.some(isPending);
+  return `<article class="job">
+    <header>
+      <div class="row"><strong>${esc(composition.title)}</strong><span class="small">${composition.shots.length} shots · ${(composition.totalMs / 1000).toFixed(1)}s${composition.audioAssetId ? " · audio bed" : ""}</span></div>
+      <span class="small">${dateLabel(composition.createdAt)}</span>
+    </header>
+    <div class="row">
+      <button class="button secondary" data-action="compose-render" data-variant="assembly" data-id="${esc(composition.id)}" ${pending ? "disabled" : ""}>Render master · ${money(renderEstimate("assembly"))}</button>
+      <button class="button secondary" data-action="compose-render" data-variant="social" data-id="${esc(composition.id)}" ${pending || !master ? "disabled" : ""} title="${master ? "Make a 9:16 cut from the assembled master" : "Render a master first"}">Make 9:16 cut · ${money(renderEstimate("social"))}</button>
+      <button class="quiet" data-action="compose-load" data-id="${esc(composition.id)}">Edit shots</button>
+    </div>
+    <div class="render-list">
+      ${renders.length === 0 ? `<p class="small" style="margin:0">No render yet. Rendering copies the participating clips and audio to the render provider for this job only.</p>` : ""}
+      ${renders.map((generation) => {
+        const asset = state.project.assets.find((item) => item.id === generation.assetId);
+        return `<div class="render-row" data-job="${esc(generation.id)}">
+          <div class="row">${statusChip(generation.status)}<strong>${esc(generation.variant === "social" ? "9:16 cut" : "Assembled master")}</strong><span class="small">${money(generation.costObservedMicro ?? generation.costEstimateMicro)}</span></div>
+          ${asset ? `<video src="${esc(asset.file)}" controls playsinline preload="metadata"></video><p class="small" style="margin:0">${asset.width} × ${asset.height} · ${(asset.durationMs / 1000).toFixed(2)}s · ${bytesLabel(asset.bytes)} · assembled from ${esc(String(composition.shots.length))} shots</p>` : `<p class="small" style="margin:0">${generation.error ? esc(generation.error.message) : "Provider is rendering."}</p>`}
+          <div class="row">
+            ${asset ? `<a class="button secondary" href="${esc(asset.download)}" download>Download</a><button class="secondary" data-action="open-asset" data-id="${esc(asset.id)}">Open</button><button class="secondary" data-action="publish-asset" data-id="${esc(asset.id)}">Publish</button>` : ""}
+            ${isPending(generation) ? `<button class="quiet" data-action="refresh-job" data-id="${esc(generation.id)}">Refresh</button>` : ""}
+            ${generation.status === "unknown" ? `<button class="secondary" data-action="reconcile-job" data-id="${esc(generation.id)}">Reconcile</button>` : ""}
+          </div>
+        </div>`;
+      }).join("")}
+    </div>
+    ${social.length && master ? `<p class="small" style="margin:0">The 9:16 cut is re-framed from the assembled master and keeps its audio. It is a separate derivative, not a new generation of the clips.</p>` : ""}
+  </article>`;
+}
+
+function renderEstimate(variant) {
+  const model = state.models.find((item) => item.id === (variant === "social" ? "studio-social" : "studio-assembly"));
+  return model?.costMicro ?? 0;
 }
 
 function historyView() {
@@ -435,7 +541,7 @@ function jobCard(generation) {
     </header>
     <p class="prompt">${esc(generation.prompt)}</p>
     <p class="small">${esc(generation.aspect ?? "")} ${generation.durationSeconds ? `· ${generation.durationSeconds}s` : ""} ${generation.error ? `· ${esc(generation.error.message)}` : ""}</p>
-    ${asset ? `<div class="result">${asset.kind === "video" ? `<video src="${esc(asset.file)}" controls preload="metadata"></video>` : `<img src="${esc(asset.file)}" alt="${esc(asset.title)}" loading="lazy">`}</div>` : ""}
+    ${asset ? `<div class="result">${asset.kind === "video" ? `<video src="${esc(asset.file)}" controls preload="metadata"></video>` : asset.kind === "audio" ? `<audio src="${esc(asset.file)}" controls preload="metadata" style="width:100%"></audio>` : `<img src="${esc(asset.file)}" alt="${esc(asset.title)}" loading="lazy">`}</div>` : ""}
     <div class="row">
       ${asset ? `<button class="secondary" data-action="open-asset" data-id="${esc(asset.id)}">Open result</button><button class="secondary" data-action="reuse-job" data-id="${esc(generation.id)}">Reuse settings</button>` : ""}
       ${pending && generation.kind === "video" ? `<button class="secondary" data-action="refresh-job" data-id="${esc(generation.id)}">Refresh</button>` : ""}
@@ -501,6 +607,7 @@ function assetView() {
   const asset = state.project?.assets.find((item) => item.id === state.assetId);
   if (!asset) return `<p class="notice">That asset is no longer in the library. <a href="#/p/${esc(state.projectId)}/library">Back to the library</a>.</p>`;
   const isVideo = asset.kind === "video";
+  const isAudio = asset.kind === "audio";
   // The server resolves this from stored same-project relationships; the client
   // never guesses a poster from a filename or title.
   const still = asset.reuseStillId ? state.project.assets.find((item) => item.id === asset.reuseStillId) : null;
@@ -526,7 +633,7 @@ function assetView() {
   return `
     <p class="small"><a href="#/p/${esc(state.projectId)}/library">← Back to ${esc(state.project.name)}</a></p>
     <div class="viewer">
-      <div class="stage">${isVideo ? `<video src="${esc(asset.file)}" controls playsinline preload="metadata"></video>` : `<img src="${esc(asset.file)}" alt="${esc(asset.title)}">`}</div>
+      <div class="stage">${isVideo ? `<video src="${esc(asset.file)}" controls playsinline preload="metadata"></video>` : isAudio ? `<div class="audio-stage"><canvas width="840" height="200" data-waveform="${esc(asset.file)}" aria-hidden="true"></canvas><audio src="${esc(asset.file)}" controls preload="metadata"></audio></div>` : `<img src="${esc(asset.file)}" alt="${esc(asset.title)}">`}</div>
       <aside class="card stack">
         <div><p class="eyebrow">${esc(asset.kind)} · ${esc(asset.source)}</p><h1 style="font-size:1.7rem">${esc(asset.title)}</h1></div>
         ${asset.caption ? `<p>${esc(asset.caption)}</p>` : ""}
@@ -534,6 +641,7 @@ function assetView() {
           <dt>Size</dt><dd>${bytesLabel(asset.bytes)}</dd>
           ${asset.width ? `<dt>Frame</dt><dd>${asset.width} × ${asset.height}</dd>` : ""}
           ${asset.durationMs ? `<dt>Duration</dt><dd>${(asset.durationMs / 1000).toFixed(1)}s</dd>` : ""}
+          ${isAudio && asset.sampleRate ? `<dt>Audio</dt><dd>${asset.sampleRate} Hz · ${asset.channels ?? "—"} channel${asset.channels === 1 ? "" : "s"}</dd>` : ""}
           <dt>Type</dt><dd>${esc(asset.mime)}</dd>
           <dt>Added</dt><dd>${dateLabel(asset.createdAt)}</dd>
           <dt>SHA-256</dt><dd style="word-break:break-all;font-size:0.72rem">${esc(asset.sha256)}</dd>
@@ -544,7 +652,7 @@ function assetView() {
           ${still ? `<button class="secondary" data-action="vary-asset" data-id="${esc(still.id)}">${isVideo ? "Make a variation of its still" : "Make a variation"}</button>` : ""}
         </div>
         <div class="row">
-          <button class="secondary" data-action="animate-asset" data-id="${esc(asset.id)}" ${isVideo ? "disabled" : ""}>Animate this still</button>
+          <button class="secondary" data-action="animate-asset" data-id="${esc(asset.id)}" ${asset.kind === "image" ? "" : "disabled"}>Animate this still</button>
           <button class="secondary" data-action="publish-asset" data-id="${esc(asset.id)}">Publish page</button>
         </div>
         ${launchKitSource}
@@ -626,6 +734,14 @@ async function handleAction(action, element) {
       return;
     case "kind": {
       state.create.kind = element.dataset.kind;
+      if (state.create.kind === "audio") {
+        state.create.model = state.project.defaults.audioModel ?? "studio-score";
+        state.create.recipeSlug = "";
+        state.create.prompt = "";
+        state.create.referenceAssetId = null;
+        render();
+        return;
+      }
       const recipes = state.project.recipes.filter((recipe) => recipe.kind === state.create.kind);
       state.create.recipeSlug = recipes[0]?.slug ?? state.create.recipeSlug;
       const recipe = recipeBySlug(state.create.recipeSlug);
@@ -845,6 +961,82 @@ async function handleAction(action, element) {
       render();
       return;
     }
+    case "compose-add":
+      if (state.compose.shotIds.includes(id)) return;
+      state.compose.shotIds = [...state.compose.shotIds, id];
+      render();
+      return;
+    case "compose-remove":
+      state.compose.shotIds = state.compose.shotIds.filter((shotId) => shotId !== id);
+      render();
+      return;
+    case "compose-up":
+    case "compose-down": {
+      const index = state.compose.shotIds.indexOf(id);
+      const next = action === "compose-up" ? index - 1 : index + 1;
+      if (index < 0 || next < 0 || next >= state.compose.shotIds.length) return;
+      const shots = [...state.compose.shotIds];
+      [shots[index], shots[next]] = [shots[next], shots[index]];
+      state.compose.shotIds = shots;
+      render();
+      return;
+    }
+    case "compose-save": {
+      const title = state.compose.title.trim() || "Untitled storyboard";
+      const result = await api(`/api/projects/${state.projectId}/compositions`, {
+        method: "POST",
+        body: JSON.stringify({
+          title,
+          shots: state.compose.shotIds.map((shotId) => ({ assetId: shotId })),
+          audioAssetId: state.compose.audioAssetId || null,
+        }),
+      });
+      state.project.compositions = [result.composition, ...(state.project.compositions ?? [])];
+      notify("Storyboard saved. Render it when you are ready.");
+      render();
+      return;
+    }
+    case "compose-load": {
+      const composition = (state.project.compositions ?? []).find((item) => item.id === id);
+      if (!composition) return;
+      state.compose = {
+        shotIds: composition.shots.map((shot) => shot.assetId),
+        audioAssetId: composition.audioAssetId ?? null,
+        title: composition.title,
+      };
+      render();
+      notify("Loaded into the cut. Saving creates a new storyboard and leaves this one intact.");
+      return;
+    }
+    case "compose-render": {
+      const variant = element.dataset.variant === "social" ? "social" : "assembly";
+      const composition = (state.project.compositions ?? []).find((item) => item.id === id);
+      if (!composition) return;
+      const master = state.project.generations
+        .filter((generation) => generation.compositionId === composition.id && generation.variant === "assembly" && generation.status === "saved" && generation.assetId)
+        .at(-1);
+      const estimateMicro = renderEstimate(variant);
+      const ok = await confirmAction(
+        variant === "social" ? "Make a 9:16 cut?" : "Render this storyboard?",
+        `${variant === "social" ? "Re-frames the assembled master to 9:16 and keeps its audio." : `${composition.shots.length} clips, ${(composition.totalMs / 1000).toFixed(1)}s assembled.`} Estimated ${money(estimateMicro)}. The participating files are copied to the render provider for this job only.`,
+        `Render · ${money(estimateMicro)}`,
+      );
+      if (!ok) return;
+      const result = await api(`/api/projects/${state.projectId}/compositions/${composition.id}/render`, {
+        method: "POST",
+        body: JSON.stringify({
+          model: variant === "social" ? "studio-social" : "studio-assembly",
+          masterAssetId: master?.assetId,
+          clientRequestId: `req_${crypto.randomUUID().replaceAll("-", "")}`,
+        }),
+      });
+      state.project.generations.unshift(result.generation);
+      state.project.budget = result.budget;
+      notify("Render submitted. You can leave this page; progress is saved.");
+      render();
+      startPolling();
+      return;
+    }
     case "open-asset-link":
       location.hash = `#/a/${state.projectId}/${id}`;
       return;
@@ -884,8 +1076,8 @@ async function submitCreate() {
     return;
   }
   const ok = await confirmAction(
-    `Start one new ${create.kind === "video" ? "video" : "image"} request?`,
-    `${model.label} · ${create.kind === "video" ? `${create.durationSeconds}s` : create.aspect} · estimated ${money(estimate())}. This can incur provider charges. Repeating the same request replays it instead of billing twice.`,
+    `Start one new ${create.kind === "video" ? "video" : create.kind === "audio" ? "audio" : "image"} request?`,
+    `${model.label} · ${create.kind === "video" ? `${create.durationSeconds}s` : create.kind === "audio" ? (model.audio?.mode === "speech" ? "narration" : "30s") : create.aspect} · estimated ${money(estimate())}. This can incur provider charges. Repeating the same request replays it instead of billing twice.`,
     `Create · ${money(estimate())}`,
   );
   if (!ok) return;
@@ -898,9 +1090,9 @@ async function submitCreate() {
       model: create.model,
       recipeId: create.recipeSlug,
       prompt: create.prompt,
-      aspect: create.kind === "image" ? create.aspect : "from-image",
+      aspect: create.kind === "image" ? create.aspect : create.kind === "video" ? "from-image" : undefined,
       durationSeconds: create.kind === "video" ? Number(create.durationSeconds) : undefined,
-      referenceAssetId: create.referenceAssetId,
+      referenceAssetId: create.kind === "audio" ? undefined : create.referenceAssetId,
       parentAssetId: create.parentAssetId,
       clientRequestId,
     }),
@@ -1042,6 +1234,73 @@ function attachDropzone() {
   });
 }
 
+/* ---------- audio waveforms ---------- */
+
+const waveformCache = new Map();
+
+function paintWaveform(canvas, peaks) {
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || canvas.width;
+  const height = canvas.clientHeight || canvas.height;
+  canvas.width = Math.round(width * ratio);
+  canvas.height = Math.round(height * ratio);
+  context.scale(ratio, ratio);
+  context.clearRect(0, 0, width, height);
+  const accent = getComputedStyle(canvas).getPropertyValue("--accent").trim() || "#d95022";
+  const line = getComputedStyle(canvas).getPropertyValue("--line").trim() || "#d8d0c2";
+  context.fillStyle = line;
+  context.fillRect(0, height / 2, width, 1);
+  const bars = peaks.length;
+  const gap = 1;
+  const barWidth = Math.max(1, (width - gap * (bars - 1)) / bars);
+  context.fillStyle = accent;
+  peaks.forEach((peak, index) => {
+    const barHeight = Math.max(1.5, peak * (height - 6));
+    context.fillRect(index * (barWidth + gap), (height - barHeight) / 2, barWidth, barHeight);
+  });
+}
+
+async function drawWaveforms() {
+  const canvases = Array.from(document.querySelectorAll("canvas[data-waveform]"));
+  if (!canvases.length) return;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return;
+  const context = new AudioContextClass();
+  for (const canvas of canvases) {
+    const url = canvas.dataset.waveform;
+    if (!url) continue;
+    try {
+      let peaks = waveformCache.get(url);
+      if (!peaks) {
+        const response = await fetch(url, { credentials: "same-origin" });
+        if (!response.ok) continue;
+        const buffer = await response.arrayBuffer();
+        const audio = await context.decodeAudioData(buffer.slice(0));
+        const channel = audio.getChannelData(0);
+        const bucketCount = 120;
+        const size = Math.max(1, Math.floor(channel.length / bucketCount));
+        peaks = Array.from({ length: bucketCount }, (_, bucket) => {
+          let peak = 0;
+          for (let index = bucket * size; index < (bucket + 1) * size && index < channel.length; index += 1) {
+            const value = Math.abs(channel[index]);
+            if (value > peak) peak = value;
+          }
+          return peak;
+        });
+        const ceiling = Math.max(...peaks, 0.001);
+        peaks = peaks.map((peak) => Math.min(1, peak / ceiling));
+        waveformCache.set(url, peaks);
+      }
+      paintWaveform(canvas, peaks);
+    } catch {
+      /* An unreadable waveform must not break the studio. */
+    }
+  }
+  context.close().catch(() => {});
+}
+
 /* ---------- events ---------- */
 
 app.addEventListener("click", async (event) => {
@@ -1056,6 +1315,14 @@ app.addEventListener("click", async (event) => {
 });
 
 app.addEventListener("change", async (event) => {
+  const composeField = event.target.closest("[data-compose]");
+  if (composeField) {
+    if (composeField.dataset.compose === "audio") {
+      state.compose.audioAssetId = composeField.value || null;
+      render();
+    }
+    return;
+  }
   const input = event.target.closest("[data-input]");
   if (!input) return;
   const kind = input.dataset.input;
@@ -1099,6 +1366,11 @@ app.addEventListener("change", async (event) => {
 });
 
 app.addEventListener("input", (event) => {
+  const composeField = event.target.closest("[data-compose]");
+  if (composeField) {
+    if (composeField.dataset.compose === "title") state.compose.title = composeField.value;
+    return;
+  }
   const input = event.target.closest("[data-input]");
   if (!input) return;
   if (input.dataset.input === "search") {
