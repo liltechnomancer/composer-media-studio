@@ -205,6 +205,9 @@ dialog h2 { margin: 0; }
 
 @media (max-width: 620px) {
   .site-header { padding: 0.65rem 1rem; }
+  .header-nav { gap: 0.5rem; }
+  .header-nav a, .header-nav button { font-size: 0.84rem; }
+  .tabs button { padding: 0.6rem 0.5rem; font-size: 0.82rem; white-space: nowrap; }
   main { padding: 1rem; }
   .asset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
   .asset .meta { padding: 0.5rem; }
