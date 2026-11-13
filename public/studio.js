@@ -425,7 +425,9 @@ function recipeControls(recipe, create) {
 function composeView() {
   const project = state.project;
   const compose = state.compose;
-  const clips = project.assets.filter((asset) => asset.kind === "video");
+  // Assembled results are exports, not takes: keep them out of the shot picker
+  // so a cut is never built from another cut by accident.
+  const clips = project.assets.filter((asset) => asset.kind === "video" && asset.source !== "assembled");
   const audio = project.assets.filter((asset) => asset.kind === "audio");
   const chosen = compose.shotIds.map((shotId) => clips.find((asset) => asset.id === shotId)).filter(Boolean);
   const totalMs = chosen.reduce((sum, asset) => sum + (asset.durationMs || 0), 0);

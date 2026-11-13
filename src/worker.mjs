@@ -940,7 +940,9 @@ async function servePublished(env, assetId, download) {
   const headers = {
     "content-type": asset.mime,
     "content-length": String(asset.bytes),
-    "cache-control": "public, max-age=86400",
+    // A withdrawn publication must stop resolving quickly, so public media is
+    // only briefly cacheable rather than cached for a day.
+    "cache-control": "public, max-age=60",
     "x-content-type-options": "nosniff",
     "content-security-policy": "default-src 'none'; sandbox",
     "cross-origin-resource-policy": "cross-origin",
