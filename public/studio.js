@@ -17,7 +17,7 @@ const state = {
   filter: "all",
   query: "",
   create: null,
-  compose: { shotIds: [], audioAssetId: null, title: "" },
+  compose: { shotIds: [], audioAssetId: null, title: "", editingId: null },
   busy: false,
   polling: null,
 };
@@ -146,6 +146,7 @@ async function loadProject(id) {
   state.project.generations = data.generations;
   state.project.recipes = data.recipes;
   state.project.publications = data.publications;
+  state.project.compositions = data.compositions ?? [];
   state.project.budget = data.budget;
   if (!state.create)
     state.create = defaultCreate();
@@ -383,6 +384,9 @@ function createView() {
         ${model?.kind === "video" ? `<label style="margin-top:0.6rem">Clip length
           <select data-input="duration">${model.durations.map((seconds) => `<option value="${seconds}" ${Number(create.durationSeconds) === seconds ? "selected" : ""}>${seconds} seconds</option>`).join("")}</select>
         </label>` : ""}
+        ${model?.kind === "audio" && model.audio?.mode === "music" ? `<label style="margin-top:0.6rem">Length
+          <select data-input="audioDuration">${[10, 15, 20, 25, 30].map((seconds) => `<option value="${seconds}" ${Number(create.durationSeconds) === seconds ? "selected" : ""}>${seconds} seconds</option>`).join("")}</select>
+        </label>` : ""}
         ${needsReference ? `<div style="margin-top:0.8rem">
           <p class="small" style="margin-bottom:0.4rem"><strong>Reference still</strong> ${selectedReference ? `· ${esc(selectedReference.title)}` : "· none selected"}</p>
           <div class="row">${images.slice(0, 8).map((asset) => `<button class="quiet" data-action="pick-reference" data-id="${esc(asset.id)}" aria-pressed="${create.referenceAssetId === asset.id}" title="${esc(asset.title)}" style="padding:0;border:${create.referenceAssetId === asset.id ? "2px solid var(--accent)" : "2px solid transparent"};border-radius:8px;width:64px;height:64px;overflow:hidden"><img src="${esc(asset.file)}" alt="${esc(asset.title)}" style="width:100%;height:100%;object-fit:cover"></button>`).join("") || `<span class="small">Upload a still first.</span>`}</div>
@@ -393,7 +397,7 @@ function createView() {
       <div class="spread">
         <div>
           <p class="eyebrow" style="margin-bottom:0.2rem">3 · Review and submit</p>
-          <p class="small" style="margin:0">${esc(model?.label ?? "No model")} · ${create.kind === "video" ? `${esc(String(create.durationSeconds))}s` : create.kind === "audio" ? (model?.audio?.mode === "speech" ? "narration" : "30s") : esc(create.aspect)} · estimated <strong>${money(estimate())}</strong></p>
+          <p class="small" style="margin:0">${esc(model?.label ?? "No model")} · ${create.kind === "video" ? `${esc(String(create.durationSeconds))}s` : create.kind === "audio" ? (model?.audio?.mode === "speech" ? "narration" : `${esc(String(create.durationSeconds))}s`) : esc(create.aspect)} · estimated <strong>${money(estimate())}</strong></p>
         </div>
         <button class="button" data-action="submit-create" ${needsReference && !create.referenceAssetId ? "disabled" : ""}>${create.kind === "video" ? "Animate this still" : create.kind === "audio" ? "Generate sound" : "Create image"} · ${money(estimate())}</button>
       </div>
@@ -433,6 +437,7 @@ function composeView() {
     <div class="grid two" style="margin-top:1rem">
       <div class="card stack">
         <p class="eyebrow">The cut</p>
+        ${compose.editingId ? `<p class="notice calm" style="margin:0">Editing a saved storyboard. Saving updates it in place and keeps every earlier render.</p>` : ""}
         <label>Title<input data-compose="title" maxlength="80" value="${esc(compose.title)}" placeholder="Field notes, cut one"></label>
         <div>
           <p class="small" style="margin:0 0 0.4rem"><strong>Shots in order</strong></p>
@@ -456,7 +461,10 @@ function composeView() {
           </select>
         </label>
         ${audio.length === 0 ? `<p class="small" style="margin:0">Upload or generate sound in Create to add a bed.</p>` : ""}
-        <button class="button" data-action="compose-save" ${chosen.length < 2 || overLimit ? "disabled" : ""}>Save storyboard</button>
+        <div class="row">
+          <button class="button" data-action="compose-save" ${chosen.length < 2 || overLimit ? "disabled" : ""}>${compose.editingId ? "Save changes" : "Save storyboard"}</button>
+          ${compose.editingId ? `<button class="quiet" data-action="compose-new">Start a new storyboard</button>` : ""}
+        </div>
         ${overLimit ? `<p class="small" style="margin:0;color:var(--bad)">Keep the cut under 60 seconds to stay inside the bounded render.</p>` : ""}
       </div>
       <div class="card stack">
@@ -488,6 +496,7 @@ function compositionCard(composition) {
       <div class="row"><strong>${esc(composition.title)}</strong><span class="small">${composition.shots.length} shots · ${(composition.totalMs / 1000).toFixed(1)}s${composition.audioAssetId ? " · audio bed" : ""}</span></div>
       <span class="small">${dateLabel(composition.createdAt)}</span>
     </header>
+    ${changedSinceRender(composition, renders) ? `<p class="small" style="margin:0"><strong>Changed since the last render.</strong> Render again to include the latest edits; earlier results are kept.</p>` : ""}
     <div class="row">
       <button class="button secondary" data-action="compose-render" data-variant="assembly" data-id="${esc(composition.id)}" ${pending ? "disabled" : ""}>Render master · ${money(renderEstimate("assembly"))}</button>
       <button class="button secondary" data-action="compose-render" data-variant="social" data-id="${esc(composition.id)}" ${pending || !master ? "disabled" : ""} title="${master ? "Make a 9:16 cut from the assembled master" : "Render a master first"}">Make 9:16 cut · ${money(renderEstimate("social"))}</button>
@@ -510,6 +519,12 @@ function compositionCard(composition) {
     </div>
     ${social.length && master ? `<p class="small" style="margin:0">The 9:16 cut is re-framed from the assembled master and keeps its audio. It is a separate derivative, not a new generation of the clips.</p>` : ""}
   </article>`;
+}
+
+function changedSinceRender(composition, renders) {
+  if (!renders.length) return false;
+  const latest = Math.max(...renders.map((generation) => generation.createdAt ?? 0));
+  return Number(composition.updatedAt ?? composition.createdAt ?? 0) > latest;
 }
 
 function renderEstimate(variant) {
@@ -739,9 +754,11 @@ async function handleAction(action, element) {
         state.create.recipeSlug = "";
         state.create.prompt = "";
         state.create.referenceAssetId = null;
+        state.create.durationSeconds = 15;
         render();
         return;
       }
+      if (state.create.kind === "video") state.create.durationSeconds = 6;
       const recipes = state.project.recipes.filter((recipe) => recipe.kind === state.create.kind);
       state.create.recipeSlug = recipes[0]?.slug ?? state.create.recipeSlug;
       const recipe = recipeBySlug(state.create.recipeSlug);
@@ -983,19 +1000,38 @@ async function handleAction(action, element) {
     }
     case "compose-save": {
       const title = state.compose.title.trim() || "Untitled storyboard";
-      const result = await api(`/api/projects/${state.projectId}/compositions`, {
-        method: "POST",
-        body: JSON.stringify({
-          title,
-          shots: state.compose.shotIds.map((shotId) => ({ assetId: shotId })),
-          audioAssetId: state.compose.audioAssetId || null,
-        }),
-      });
-      state.project.compositions = [result.composition, ...(state.project.compositions ?? [])];
-      notify("Storyboard saved. Render it when you are ready.");
+      const payload = {
+        title,
+        shots: state.compose.shotIds.map((shotId) => ({ assetId: shotId })),
+        audioAssetId: state.compose.audioAssetId || null,
+      };
+      const editingId = state.compose.editingId;
+      if (editingId) {
+        const result = await api(`/api/projects/${state.projectId}/compositions/${editingId}`, {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        });
+        state.project.compositions = (state.project.compositions ?? []).map((item) =>
+          item.id === editingId ? { ...item, ...result.composition } : item,
+        );
+        state.compose.editingId = editingId;
+        notify("Storyboard updated. Earlier renders still belong to it.");
+      } else {
+        const result = await api(`/api/projects/${state.projectId}/compositions`, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        state.project.compositions = [result.composition, ...(state.project.compositions ?? [])];
+        state.compose.editingId = result.composition.id;
+        notify("Storyboard saved. Render it when you are ready.");
+      }
       render();
       return;
     }
+    case "compose-new":
+      state.compose = { shotIds: [], audioAssetId: null, title: "", editingId: null };
+      render();
+      return;
     case "compose-load": {
       const composition = (state.project.compositions ?? []).find((item) => item.id === id);
       if (!composition) return;
@@ -1003,9 +1039,10 @@ async function handleAction(action, element) {
         shotIds: composition.shots.map((shot) => shot.assetId),
         audioAssetId: composition.audioAssetId ?? null,
         title: composition.title,
+        editingId: composition.id,
       };
       render();
-      notify("Loaded into the cut. Saving creates a new storyboard and leaves this one intact.");
+      notify("Loaded into the cut. Saving updates this storyboard and keeps its earlier renders.");
       return;
     }
     case "compose-render": {
@@ -1091,7 +1128,7 @@ async function submitCreate() {
       recipeId: create.recipeSlug,
       prompt: create.prompt,
       aspect: create.kind === "image" ? create.aspect : create.kind === "video" ? "from-image" : undefined,
-      durationSeconds: create.kind === "video" ? Number(create.durationSeconds) : undefined,
+      durationSeconds: create.kind === "video" || (create.kind === "audio" && model?.audio?.mode === "music") ? Number(create.durationSeconds) : undefined,
       referenceAssetId: create.kind === "audio" ? undefined : create.referenceAssetId,
       parentAssetId: create.parentAssetId,
       clientRequestId,
@@ -1347,6 +1384,11 @@ app.addEventListener("change", async (event) => {
     return;
   }
   if (kind === "duration") {
+    state.create.durationSeconds = Number(input.value);
+    render();
+    return;
+  }
+  if (kind === "audioDuration") {
     state.create.durationSeconds = Number(input.value);
     render();
     return;

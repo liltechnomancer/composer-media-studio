@@ -115,12 +115,12 @@ export const models = {
     endpoint: "fal-ai/stable-audio",
     kind: "audio",
     description:
-      "An original 30-second music or atmosphere bed from a written description. Instrumental, generated for this studio.",
-    audio: { mode: "music", maxSeconds: 30 },
+      "An original music or atmosphere bed from a written description, 10 to 30 seconds long. Instrumental, generated for this studio.",
+    audio: { mode: "music", minSeconds: 10, maxSeconds: 30 },
     references: 0,
     costMicro: 15_000,
     costBasis:
-      "fal.ai estimate for one 30-second Stable Audio generation; confirm current fal pricing before relying on it.",
+      "fal.ai estimate per second of Stable Audio, shown against the length you choose; confirm current fal pricing before relying on it.",
   },
   "studio-voice": {
     id: "studio-voice",
@@ -205,6 +205,10 @@ export function getModel(id) {
 }
 
 export function estimateCost(model, settings = {}) {
+  if (model.kind === "audio" && model.audio?.mode === "music") {
+    const seconds = Number(settings.durationSeconds ?? model.audio.maxSeconds);
+    return Math.max(1, Math.round((model.costMicro * seconds) / model.audio.maxSeconds));
+  }
   if (model.kind !== "video") return model.costMicro;
   const base = model.durations?.[0] ?? 5;
   const seconds = Number(settings.durationSeconds ?? base);
@@ -243,7 +247,13 @@ export function validateSettings(model, input) {
         throw new HttpError(400, `${model.label} takes up to ${model.audio.maxChars} characters`);
       return { prompt, durationSeconds: null };
     }
-    return { prompt, durationSeconds: model.audio.maxSeconds };
+    const durationSeconds = Math.round(Number(input.durationSeconds ?? model.audio.maxSeconds));
+    if (!Number.isFinite(durationSeconds) || durationSeconds < model.audio.minSeconds || durationSeconds > model.audio.maxSeconds)
+      throw new HttpError(
+        400,
+        `${model.label} makes ${model.audio.minSeconds} to ${model.audio.maxSeconds} seconds of sound`,
+      );
+    return { prompt, durationSeconds };
   }
 
   const durationSeconds = Number(input.durationSeconds ?? model.durations[0]);
@@ -470,7 +480,11 @@ export async function submitAudio(env, model, settings) {
           output_format: "mp3_44100_128",
           enable_safety_checker: true,
         }
-      : { prompt: settings.prompt, seconds_total: model.audio.maxSeconds, enable_safety_checker: true };
+      : {
+          prompt: settings.prompt,
+          seconds_total: settings.durationSeconds ?? model.audio.maxSeconds,
+          enable_safety_checker: true,
+        };
   return falSubmit(env, model.endpoint, input);
 }
 
