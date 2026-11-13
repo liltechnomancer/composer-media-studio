@@ -1,0 +1,43 @@
+{
+  "contract": 1,
+  "id": "media-studio",
+  "name": "Media Studio",
+  "version": "0.1.0",
+  "repository": "https://github.com/loftwah/composer-media-studio",
+  "runtime": "cloudflare-worker",
+  "entry": "src/worker.mjs",
+  "dataVersion": 1,
+  "routes": ["/media-studio"],
+  "capabilities": ["items:read", "media:private"],
+  "configuration": {
+    "title": {
+      "type": "string",
+      "default": "Media Studio",
+      "maxLength": 80
+    },
+    "intro": {
+      "type": "string",
+      "default": "Make and keep images and video, with a deliberate public page when something is ready.",
+      "maxLength": 240
+    },
+    "creativeDirection": {
+      "type": "string",
+      "default": "",
+      "maxLength": 600
+    },
+    "visibility": {
+      "type": "select",
+      "options": ["private", "unlisted"],
+      "default": "private"
+    }
+  },
+  "portability": {
+    "version": 1,
+    "format": "media-studio.export/v1",
+    "export": "/api/projects/:project/export",
+    "scope": "current-authorized-owner-session",
+    "includes": ["project", "references", "assets-metadata", "generations", "recipes", "publications"],
+    "excludes": ["secrets", "session-cookies", "media-bytes"],
+    "mediaDownload": "/api/assets/:asset/download"
+  }
+}

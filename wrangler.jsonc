@@ -1,0 +1,49 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "composer-media-studio",
+  "account_id": "1003dc1d93af0ebea56b2f1252f89627",
+  "main": "./src/worker.mjs",
+  "compatibility_date": "2026-11-10",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "media.loftwah.com",
+      "custom_domain": true
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "media-studio",
+      "database_id": "c3451e4b-48b7-44cd-bf0e-7d953f763df2",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "media-studio"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  },
+  "vars": {
+    "PUBLIC_ORIGIN": "https://media.loftwah.com",
+    "MONTHLY_ALLOWANCE_MICRO": "5000000"
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "preview_urls": false
+}
