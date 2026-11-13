@@ -6,9 +6,14 @@
   "repository": "https://github.com/loftwah/composer-media-studio",
   "runtime": "cloudflare-worker",
   "entry": "src/worker.mjs",
-  "dataVersion": 1,
-  "routes": ["/media-studio"],
-  "capabilities": ["items:read", "media:private"],
+  "dataVersion": 2,
+  "routes": [
+    "/media-studio"
+  ],
+  "capabilities": [
+    "items:read",
+    "media:private"
+  ],
   "configuration": {
     "title": {
       "type": "string",
@@ -27,7 +32,10 @@
     },
     "visibility": {
       "type": "select",
-      "options": ["private", "unlisted"],
+      "options": [
+        "private",
+        "unlisted"
+      ],
       "default": "private"
     }
   },
@@ -36,8 +44,19 @@
     "format": "media-studio.export/v1",
     "export": "/api/projects/:project/export",
     "scope": "current-authorized-owner-session",
-    "includes": ["project", "references", "assets-metadata", "generations", "recipes", "publications"],
-    "excludes": ["secrets", "session-cookies", "media-bytes"],
+    "includes": [
+      "project",
+      "references",
+      "assets-metadata",
+      "generations",
+      "recipes",
+      "publications"
+    ],
+    "excludes": [
+      "secrets",
+      "session-cookies",
+      "media-bytes"
+    ],
     "mediaDownload": "/api/assets/:asset/download"
   }
 }
