@@ -2,6 +2,7 @@ import { encodeWav } from "./wav.js";
 import { isLocalRenderProvenance, publicCaption } from "./asset-caption.js";
 import { shotRange } from "./shot-trims.js";
 import { recipeModelCompatible, recipeModelSettings } from "./recipe-selection.js";
+import { prepareVoiceDraft, restoreCreateDraft, switchCreateProject, createEventBelongsToProject, hasCreateDraftChanges, shouldWarnCreateDrafts } from "./voice-handoff.js";
 // MIT. Media Studio client. Vanilla, same-origin, no build step.
 
 const app = document.querySelector("#app");
@@ -24,6 +25,14 @@ function clearMixPreview() {
 }
 window.addEventListener('pagehide', clearMixPreview);
 const shareImportDrafts = new Map();
+// Displaced Create drafts stay project-scoped and recoverable for this tab's lifetime.
+const priorCreateDrafts = new Map();
+const projectCreateDrafts = new Map();
+const projectCreateDefaults = new Map();
+let createProjectId = null;
+window.addEventListener("beforeunload", (event) => {
+  if (shouldWarnCreateDrafts(projectCreateDrafts, priorCreateDrafts, state.create, projectCreateDefaults.get(createProjectId))) event.preventDefault();
+});
 // Comparison is an in-memory view of existing same-project images, not a saved collection.
 const comparisons = new Map();
 
@@ -207,8 +216,8 @@ async function loadProject(id) {
   state.project.publications = data.publications;
   state.project.compositions = data.compositions ?? [];
   state.project.budget = data.budget;
-  if (!state.create)
-    state.create = defaultCreate();
+  state.create = switchCreateProject(projectCreateDrafts, projectCreateDefaults, createProjectId, state.create, id, defaultCreate);
+  createProjectId = id;
   return data;
 }
 
@@ -287,6 +296,7 @@ function render() {
     } else app.innerHTML = homeView();
   } else if (state.view === "asset") {
     if (homeMounted) { creativeHome.unmountHome(); homeMounted = false; }
+    if (!state.project || state.project.id !== state.projectId) { app.innerHTML = '<p class="notice">Loading…</p>'; return; }
     if (creativeHome) {
       app.innerHTML = '<div id="creative-media"></div>';
       const asset = state.project?.assets.find((item) => item.id === state.assetId) ?? null;
@@ -299,27 +309,27 @@ function render() {
   } else {
     if (homeMounted) { creativeHome.unmountHome(); homeMounted = false; }
     app.innerHTML = projectView();
-    if (creativeHome && state.tab === "library" && state.project) {
+    if (creativeHome && state.tab === "library" && state.project?.id === state.projectId) {
       renderReactLibrary();
       mediaMounted = true;
     }
-    if (creativeHome && state.tab === "create" && state.project) {
+    if (creativeHome && state.tab === "create" && state.project?.id === state.projectId) {
       renderReactCreate();
       mediaMounted = true;
     }
-    if (creativeHome && state.tab === "assemble" && state.project) {
+    if (creativeHome && state.tab === "assemble" && state.project?.id === state.projectId) {
       renderReactAssemble();
       mediaMounted = true;
     }
-    if (creativeHome && state.tab === "settings" && state.project) {
+    if (creativeHome && state.tab === "settings" && state.project?.id === state.projectId) {
       creativeHome.renderSettings(app.querySelector("#creative-media"), { project: state.project, draft: settingsDrafts.get(state.projectId) });
       mediaMounted = true;
     }
-    if (creativeHome && state.tab === "history" && state.project) {
+    if (creativeHome && state.tab === "history" && state.project?.id === state.projectId) {
       renderReactHistory();
       mediaMounted = true;
     }
-    if (creativeHome && state.tab === "publish" && state.project) {
+    if (creativeHome && state.tab === "publish" && state.project?.id === state.projectId) {
       creativeHome.renderPublish(app.querySelector("#creative-media"), { publications: state.project.publications, origin: location.origin });
       mediaMounted = true;
     }
@@ -399,7 +409,20 @@ function studioReentry(session) {
 
 function renderReactAssemble() {
   const projectId = state.projectId;
-  creativeHome.renderAssemble(app.querySelector("#creative-media"), { projectId, onAssetSaved: (asset) => {
+  creativeHome.renderAssemble(app.querySelector("#creative-media"), { projectId, onVoiceDraft: (script) => {
+    if (!state.project || state.project.id !== projectId || state.projectId !== projectId || createProjectId !== projectId || state.view !== "project" || state.tab !== "assemble" || !state.session?.actions.includes("edit")) return "Reopen this studio before preparing narration.";
+    try {
+      const { previous, voice } = prepareVoiceDraft(state.create, script, modelById("studio-voice"));
+      if (hasCreateDraftChanges(previous, projectCreateDefaults.get(projectId))) {
+        const drafts = priorCreateDrafts.get(projectId) ?? [];
+        drafts.push(previous); priorCreateDrafts.set(projectId, drafts);
+      }
+      state.create = voice;
+      location.hash = `#/p/${projectId}/create`;
+      notify(priorCreateDrafts.get(projectId)?.length ? "Narration draft prepared. Earlier Create drafts are available above; no request was sent." : "Narration draft prepared. No request was sent.");
+      return null;
+    } catch (error) { return error.message; }
+  }, onAssetSaved: (asset) => {
     if (!state.project || state.project.id !== projectId) return;
     state.project.assets = [asset, ...state.project.assets.filter((item) => item.id !== asset.id)];
   }, canEdit: Boolean(state.session?.actions.includes("edit")), onSongStoryboard: (composition) => {
@@ -492,9 +515,15 @@ function projectCard(project) {
   </button>`;
 }
 
+function createDraftRecovery() {
+  const drafts = priorCreateDrafts.get(state.projectId) ?? [];
+  if (!drafts.length) return "";
+  return `<div class="card stack"><strong>Earlier Create drafts</strong><p class="small">These drafts are kept in this tab for this session. Reloading or closing the tab clears them.</p><div class="row"><label>Choose a draft<select id="prior-create-draft">${drafts.map((draft,index)=>`<option value="${index}">Draft ${index + 1} · ${esc(draft.kind ?? "create")}</option>`).join("")}</select></label><button type="button" class="secondary" data-action="restore-create-draft">Restore draft</button><button type="button" class="quiet" data-action="discard-create-drafts">Discard earlier drafts</button></div></div>`;
+}
+
 function projectView() {
   const project = state.project;
-  if (!project) return `<p class="notice">Loading…</p>`;
+  if (!project || project.id !== state.projectId) return `<p class="notice">Loading…</p>`;
   return `
     <div class="spread">
       <div>
@@ -515,7 +544,7 @@ function projectView() {
     </nav>
     <section role="tabpanel" aria-label="${esc(state.tab)}">
       ${state.tab === "library" ? (creativeHome ? '<div id="creative-media"></div>' : libraryView()) : ""}
-      ${state.tab === "create" ? (creativeHome ? '<div id="creative-media"></div>' : createView()) : ""}
+      ${state.tab === "create" ? `${createDraftRecovery()}<div data-create-project="${esc(project.id)}">${creativeHome ? '<div id="creative-media"></div>' : createView()}</div>` : ""}
       ${state.tab === "assemble" ? (creativeHome ? '<div id="creative-media"></div>' : composeView()) : ""}
       ${state.tab === "history" ? (creativeHome ? '<div id="creative-media"></div>' : historyView()) : ""}
       ${state.tab === "publish" ? (creativeHome ? '<div id="creative-media"></div>' : publishView()) : ""}
@@ -1158,6 +1187,25 @@ async function handleAction(action, element, keyboard = false) {
         drawWaveforms();
       } else render();
       return;
+    case "restore-create-draft": {
+      if (!state.project || state.project.id !== state.projectId || createProjectId !== state.projectId) return;
+      const drafts = priorCreateDrafts.get(state.projectId) ?? [];
+      const value = document.querySelector("#prior-create-draft")?.value;
+      if (value === undefined) return;
+      const preserveCurrent = hasCreateDraftChanges(state.create, projectCreateDefaults.get(state.projectId));
+      const { restored, remaining } = restoreCreateDraft(drafts, Number(value), state.create, preserveCurrent);
+      if (remaining.length) priorCreateDrafts.set(state.projectId, remaining); else priorCreateDrafts.delete(state.projectId);
+      state.create = restored;
+      render();
+      notify(preserveCurrent ? "Draft restored. The draft you just left is also available above." : "Draft restored.");
+      return;
+    }
+    case "discard-create-drafts": {
+      const projectId = state.projectId;
+      const confirmed = await confirmAction("Discard earlier Create drafts?", "These session-only drafts will be lost. The draft currently open will remain.", "Discard drafts");
+      if (confirmed && state.projectId === projectId) { priorCreateDrafts.delete(projectId); render(); notify("Earlier session drafts discarded."); }
+      return;
+    }
     case "kind": {
       state.create.kind = element.dataset.kind;
       if (state.create.kind === "audio") {
@@ -2374,6 +2422,8 @@ app.addEventListener("change", async (event) => {
   }
   const input = event.target.closest("[data-input]");
   if (!input) return;
+  const createOwner = input.closest("[data-create-project]")?.dataset.createProject;
+  if (!createEventBelongsToProject(createOwner, state.projectId, createProjectId)) return;
   const kind = input.dataset.input;
   if (kind === "upload") {
     await uploadFiles(input.files);
@@ -2428,6 +2478,8 @@ app.addEventListener("input", (event) => {
   }
   const input = event.target.closest("[data-input]");
   if (!input) return;
+  const createOwner = input.closest("[data-create-project]")?.dataset.createProject;
+  if (!createEventBelongsToProject(createOwner, state.projectId, createProjectId)) return;
   if (input.dataset.input === "search") {
     state.query = input.value;
     if (mediaMounted) {
@@ -2531,7 +2583,16 @@ window.addEventListener("hashchange", async () => {
     render();
     return;
   }
-  if (!state.project || state.project.id !== state.projectId) await loadProject(state.projectId);
+  if (!state.project || state.project.id !== state.projectId) {
+    const requestedProject = state.projectId;
+    render(); // Remove the previous project's private UI while access is checked.
+    try { await loadProject(requestedProject); }
+    catch (error) {
+      if (state.projectId === requestedProject && error.message !== "Signed out") app.innerHTML = '<div class="card"><h1>Could not open this studio</h1><p>Check your access and try again.</p><a href="#/">Back to studios</a></div>';
+      return;
+    }
+    if (state.projectId !== requestedProject) return;
+  }
   render();
   if (route.view === "asset" && pendingViewerFocus?.projectId === route.projectId && pendingViewerFocus.assetId === route.assetId) {
     pendingViewerFocus = null;
