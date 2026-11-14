@@ -196,7 +196,7 @@ test("a published still gives a signed-out visitor the build journey", () => {
   });
   assert.match(html, />Build your own Media Studio<\/a>/);
   assert.match(html, /href="https:\/\/composer\.loftwah\.com\/init\?start=media-studio&amp;ref=public"/);
-  assert.match(html, />See how this was made<\/a>/);
+  assert.match(html, />Read how this was made<\/a>/);
   assert.match(html, /href="https:\/\/composer\.loftwah\.com\/media-studio"/);
   assert.match(html, />Owner sign-in<\/a>/);
   assert.doesNotMatch(html, /visit the studio/);
@@ -206,7 +206,7 @@ test("a published still gives a signed-out visitor the build journey", () => {
 test("an installation without destinations still has a useful page and no dead end", () => {
   const html = published();
   assert.doesNotMatch(html, /Build your own Media Studio/);
-  assert.doesNotMatch(html, /See how this was made/);
+  assert.doesNotMatch(html, /Read how this was made/);
   assert.match(html, /href="https:\/\/media\.loftwah\.com\/">Owner sign-in<\/a>/);
   assert.match(html, /Download image/);
 });

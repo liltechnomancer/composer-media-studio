@@ -2,7 +2,7 @@
 
 import { escapeHtml } from "./util.mjs";
 
-const mark = `<svg viewBox="0 0 48 48" aria-hidden="true" focusable="false"><rect x="4" y="4" width="40" height="40" rx="8" fill="#252923"/><path d="M11 34h26" stroke="#f4f0e8" stroke-width="2" stroke-linecap="round"/><circle cx="24" cy="22" r="9" fill="none" stroke="#f4f0e8" stroke-width="2"/><path d="M15 22a9 9 0 0 1 18 0" fill="#d95022"/><circle cx="24" cy="22" r="3.2" fill="#f4f0e8"/></svg>`;
+const mark = `<img class="brand-mark" src="/brand/composer-icon-tile.svg" width="40" height="40" alt="">`;
 
 const styles = "/studio.css";
 
@@ -17,6 +17,7 @@ function head({
   url,
   kind = "website",
   extra = "",
+  theme = true,
 }) {
   const hasImage = Boolean(image);
   const width = Number.isInteger(imageWidth) && imageWidth > 0 ? imageWidth : null;
@@ -44,15 +45,18 @@ function head({
     .filter(Boolean)
     .join("\n");
   return `<!doctype html>
-<html lang="en">
+<html lang="en"${theme ? ' data-theme="light"' : ""}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
 <meta name="description" content="${escapeHtml(description)}">
 <meta name="theme-color" content="#f4f0e8">
-<link rel="icon" href="/mark.svg" type="image/svg+xml">
+<link rel="icon" href="/brand/composer-icon-tile.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/brand/composer-icon-tile.svg">
+<link rel="preload" href="/brand/space-grotesk.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="${styles}">
+${theme ? '<script src="/theme.js" defer></script>' : ""}
 ${imageTags}
 <meta property="og:type" content="${kind}">
 <meta property="og:title" content="${escapeHtml(title)}">
@@ -63,23 +67,43 @@ ${extra}
 </head>`;
 }
 
-export function shell({ revision }) {
+function brandByline() {
+  return `<span class="brand-by">App Composer</span>`;
+}
+
+function header({ session, composerOrigin, storyUrl, buildUrl, helpHref = "/help" }) {
+  const bridged = session?.mode === "bridge";
+  const context = session
+    ? `<p class="session-context"><span>${bridged ? "Opened from App Composer" : "Standalone owner session"}</span>${
+        session.actorName ? ` · ${escapeHtml(session.actorName)}` : ""
+      }${session.workspaceName ? ` · ${escapeHtml(session.workspaceName)}` : ""}${
+        session.project ? ` · project ${escapeHtml(session.project)}` : ""
+      }</p>`
+    : "";
+  return `<header class="site-header">
+  <a class="wordmark" href="#/" aria-label="Media Studio home">${mark}<span>Media Studio</span>${brandByline()}</a>
+  <nav class="header-nav" aria-label="Studio">
+    ${bridged && composerOrigin ? `<a class="quiet" href="${escapeHtml(composerOrigin)}/media-studio/studio" title="Return to App Composer and reopen this studio">App Composer</a>` : ""}
+    ${storyUrl ? `<a class="quiet" href="${escapeHtml(storyUrl)}">Read the story</a>` : ""}
+    <a href="#/">Projects</a>
+    <a href="${escapeHtml(helpHref)}" target="_blank" rel="noopener">Help</a>
+    <button class="quiet" id="signout" type="button">Sign out</button>
+    <button class="quiet theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme" aria-pressed="false">Dark</button>
+  </nav>
+  ${context}
+</header>`;
+}
+
+export function shell({ revision, session = null, composerOrigin = null, storyUrl = null }) {
   return `${head({
     title: "Media Studio — make, assemble and keep images, video and sound",
     description:
-      "An independent studio for uploads, image generation, reference variations, image-to-video, generated music and narration, bounded assembly, saved compositions and deliberate publishing.",
+      "An independent studio for uploads, image generation, reference variations, masked fills, background removal, upscaling, image-to-video, generated music, narration and effects, bounded multi-track assembly, saved compositions and deliberate publishing.",
     extra: `<meta name="robots" content="noindex">`,
   })}
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<header class="site-header">
-  <a class="wordmark" href="#/" aria-label="Media Studio home">${mark}<span>Media Studio</span><span class="brand-by">App Composer</span></a>
-  <nav class="header-nav" aria-label="Studio">
-    <a href="#/">Projects</a>
-    <a href="/help" target="_blank" rel="noopener">Help</a>
-    <button class="quiet" id="signout" type="button">Sign out</button>
-  </nav>
-</header>
+${header({ session, composerOrigin, storyUrl })}
 <main id="main" tabindex="-1">
   <div id="app">
     <p class="notice calm">Loading your studio…</p>
@@ -102,7 +126,7 @@ export function shell({ revision }) {
 </html>`;
 }
 
-export function loginPage({ next = "/", revision = "dev", bridged = false }) {
+export function loginPage({ next = "/", revision = "dev", bridged = false, composerOrigin = null, storyUrl = null }) {
   return `${head({
     title: "Sign in — Media Studio",
     description: "Owner sign-in for an independent Media Studio.",
@@ -116,9 +140,10 @@ export function loginPage({ next = "/", revision = "dev", bridged = false }) {
       <p class="eyebrow">${bridged ? "App Composer · Media Studio" : "Independent studio"}</p>
       <h1 style="font-size:2rem">Your media, kept here.</h1>
     </div>
-    <p>Upload and organise images and video, make new work with a funded model, and publish deliberately. Uploads and the library work without any AI account.</p>
+    <p>Upload and organise images, video and sound, make and edit new work with a funded model, and publish deliberately. Uploads and the library work without any AI account.</p>
     ${bridged ? `<p class="notice calm">Open this studio from App Composer. Your existing Composer sign-in carries you in; there is no second password.</p>
-    <p><a class="button" href="https://composer.loftwah.com/media-studio/studio">Continue with App Composer</a></p>
+    <p><a class="button" href="${escapeHtml(composerOrigin || "https://composer.loftwah.com")}/media-studio/studio">Continue with App Composer</a></p>
+    ${storyUrl ? `<p class="small"><a href="${escapeHtml(storyUrl)}">Read how this studio was built</a></p>` : ""}
     <details><summary>Standalone owner sign-in</summary>` : ""}
     <form id="login-form" class="stack">
       <label>Owner passphrase
@@ -175,7 +200,7 @@ export function publicPage({
       ? `<a class="button" href="${escapeHtml(buildUrl)}">Build your own Media Studio</a>`
       : "",
     storyUrl
-      ? `<a class="button secondary" href="${escapeHtml(storyUrl)}">See how this was made</a>`
+      ? `<a class="button secondary" href="${escapeHtml(storyUrl)}">Read how this was made</a>`
       : "",
   ].filter(Boolean);
   const nextCopy = buildUrl
@@ -191,11 +216,19 @@ export function publicPage({
     imageHeight: ogImageHeight,
     url,
     kind: isVideo ? "video.other" : isAudio ? "music.song" : "website",
+    theme: false,
     extra: isVideo
       ? `<meta property="og:video" content="${escapeHtml(origin + media)}"><meta property="og:video:type" content="${escapeHtml(mime)}">${durationMs ? `<meta property="video:duration" content="${Math.round(durationMs / 1000)}">` : ""}`
       : "",
   })}
 <body>
+<header class="site-header">
+  <a class="wordmark" href="${escapeHtml(origin)}/" aria-label="Media Studio home">${mark}<span>Media Studio</span>${brandByline()}</a>
+  <nav class="header-nav" aria-label="Published piece">
+    ${storyUrl ? `<a href="${escapeHtml(storyUrl)}">Read the story</a>` : ""}
+    ${buildUrl ? `<a href="${escapeHtml(buildUrl)}">Build your own</a>` : ""}
+  </nav>
+</header>
 <main class="public-page" id="main">
   <p class="eyebrow">Published from Media Studio</p>
   <h1>${escapeHtml(title)}</h1>
@@ -215,7 +248,7 @@ export function publicPage({
       <a href="${escapeHtml(download)}" download>Download ${isVideo ? "video" : isAudio ? "audio" : "image"}</a>
     </figcaption>
   </figure>
-  <p class="small">A deliberately published piece. Private projects, other media and prompts stay in the studio. Withdrawing this page stops new visits here; copies someone already downloaded cannot be recalled.</p>
+  <p class="small">A deliberately published piece. Private projects, other media, masks and prompts stay in the studio. Withdrawing this page stops new visits here; copies someone already downloaded cannot be recalled.</p>
   ${
     actions.length
       ? `<section class="public-next" aria-labelledby="public-next-title">
@@ -237,15 +270,15 @@ export function notFoundPage() {
 <body><main id="main"><p class="eyebrow">404</p><h1>Nothing here.</h1><p>This page may have been withdrawn. <a href="/">Return to the studio</a>.</p></main></body></html>`;
 }
 
-export function helpPage() {
+export function helpPage({ composerOrigin = null, storyUrl = null } = {}) {
   return `${head({
     title: "How Media Studio works",
-    description: "What the studio keeps, what generation costs, and how to recover from a failed save.",
+    description: "What the studio keeps, what generation costs, how masked edits and multi-track assembly work, and how to recover from a failed save.",
   })}
 <body>
 <header class="site-header">
-  <a class="wordmark" href="/" aria-label="Media Studio home">${mark}<span>Media Studio</span><span class="brand-by">App Composer</span></a>
-  <nav class="header-nav"><a href="/">Open the studio</a></nav>
+  <a class="wordmark" href="/" aria-label="Media Studio home">${mark}<span>Media Studio</span>${brandByline()}</a>
+  <nav class="header-nav">${storyUrl ? `<a href="${escapeHtml(storyUrl)}">Read the story</a>` : ""}<a href="/">Open the studio</a><button class="quiet theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme" aria-pressed="false">Dark</button></nav>
 </header>
 <main id="main" class="public-page">
   <p class="eyebrow">Help and setup</p>
@@ -256,19 +289,25 @@ export function helpPage() {
   <p>Uploads, project collections, search and filters, the viewer, renaming, downloads, deletion, creative references, storyboards, export and public pages all work without any model provider. Nothing on those paths calls a model or spends money.</p>
   <p>Uploads accept JPEG, PNG and WebP images and WAV, MP3 or M4A audio up to 32&nbsp;MB, and MP4 or WebM video up to 64&nbsp;MB. The studio checks the actual bytes and records the real dimensions, duration and audio format. A reference image for generation is capped at 8&nbsp;MB. Rendering a storyboard is the one path that needs a provider, because it needs a renderer.</p>
 
-  <h2>Generation</h2>
+  <h2>Generation and editing</h2>
   <p>Generation uses the provider configured on this studio, not your personal account elsewhere:</p>
   <ul>
-    <li><strong>Images</strong> run on Cloudflare Workers AI on this studio's own Cloudflare account. Studio Quick and Studio Draft make new stills in square, portrait, landscape or wide frames. Studio Detail takes one selected still as a reference and makes a variation.</li>
-    <li><strong>Video</strong> runs on fal.ai through this studio's own key. Animate a still sends the selected image and a motion prompt to an asynchronous image-to-video job, then copies the finished MP4 into this studio's storage.</li>
-    <li><strong>Sound</strong> runs on fal.ai too. Studio Score makes an instrumental bed of 10 to 30 seconds, so the bed can match the cut; Studio Voice narrates text you supply. Both come back as audio assets with their real duration, sample rate and channel count, and both can be published or used as a storyboard's audio track.</li>
-    <li><strong>Assembly</strong> is a bounded render, not an unbounded transcode. The studio signs short-lived read links for the participating clips and audio, asks the render provider for one composition of up to sixty seconds, then copies the assembled MP4 into this studio's storage. The composition stays editable; rendering again is a new, separately estimated request and keeps the earlier result.</li>
+    <li><strong>Images</strong> run on Cloudflare Workers AI. Studio Quick and Studio Draft make new stills in square, portrait, landscape or wide frames. Studio Detail takes one selected still as a reference and makes a variation.</li>
+    <li><strong>Edits</strong> run on fal.ai. Studio Fill takes a still and a same-size mask for a real inpaint or outpaint. Studio Cutout removes the background and returns a transparent PNG. Studio Upscale doubles the still. The original, mask and result are separate assets with their own hashes.</li>
+    <li><strong>Video</strong> runs on fal.ai. Animate a still sends the selected image and a motion prompt to an asynchronous image-to-video job, then copies the finished MP4 into this studio's storage.</li>
+    <li><strong>Sound</strong> runs on fal.ai too. Studio Score makes an instrumental bed of 10 to 30 seconds; Studio Voice narrates text you supply; Studio Effect makes one short cue. Each is its own audio asset with its real duration, sample rate and channel count. Music, narration and effects can be mixed in the browser with trim, gain and fades, then saved as a new WAV before the render uses it.</li>
+    <li><strong>Assembly</strong> is a bounded render. The studio signs short-lived read links for the participating clips and audio, asks the render provider for one composition of up to sixty seconds, then copies the assembled MP4 into this studio's storage. The composition stays editable; rendering again is a new, separately estimated request and keeps the earlier result.</li>
+    <li><strong>The 9:16 cut</strong> keeps the selected shot order. A first merge fits every take into a true 1080 × 1920 frame; a second compose adds the saved sound. It is not a renamed 4:5 file and it does not re-sort your edit.</li>
   </ul>
   <p>Every request shows an estimate before you confirm it. Estimates are not invoices. The monthly allowance is enforced by one atomic check across the whole studio, so two simultaneous requests cannot oversubscribe it.</p>
+
+  <h2>Access from App Composer</h2>
+  <p>An installation opened from App Composer uses the existing Composer sign-in. The handoff carries the current actor, workspace, selected project and only the actions granted there. Read, edit, generate, publish and admin are separate. Every privileged action re-checks the current Composer grant on the server, so revoking a member stops the next dispatch even if their studio tab is still open. A standalone installation uses its own owner passphrase and does not depend on Composer.</p>
 
   <h2>What the statuses mean</h2>
   <ul>
     <li><strong>Prepared / Submitting / Submitted / Generating</strong> — the request is saved and the provider is working.</li>
+    <li><strong>Merging / composing</strong> — the 9:16 cut is on its first or second bounded provider call.</li>
     <li><strong>Copying result / Saving</strong> — the provider finished. The studio is writing the exact bytes and the library record. A save failure can be retried without generating again.</li>
     <li><strong>Saved</strong> — owned bytes and a library record both exist.</li>
     <li><strong>Cancel requested</strong> — the provider was asked to stop. The studio shows what the provider confirmed. A cancellation is not a refund.</li>
@@ -277,7 +316,7 @@ export function helpPage() {
   </ul>
 
   <h2>Publishing and withdrawing</h2>
-  <p>A published page exposes its title, description and media, plus a download link. Prompts, other projects and filenames stay private. Withdrawing stops new visits immediately, but copies someone already downloaded cannot be recalled. Deleting media also withdraws any page using it.</p>
+  <p>A published page exposes its title, description and media, plus a download link. Prompts, masks, other projects and filenames stay private. Withdrawing stops new visits immediately, but copies someone already downloaded cannot be recalled. Deleting media also withdraws any page using it.</p>
 
   <h2>Ownership and recovery</h2>
   <p>This studio owns its D1 metadata, its R2 media and its provider keys. The project export contains the project record, references, prompts, generation history, costs and lineage without secrets. Media files download separately while they still exist. An export is not a backup of R2; copy the files you need.</p>
@@ -285,10 +324,11 @@ export function helpPage() {
 
   <h2>Owner setup for a new installation</h2>
   <ol>
-    <li>Create a D1 database and an R2 bucket, then apply <code>migrations/0001.sql</code>.</li>
+    <li>Create a D1 database and an R2 bucket, then apply the migrations in order.</li>
     <li>Bind them as <code>DB</code> and <code>MEDIA</code>, and add the Workers AI binding <code>AI</code>.</li>
     <li>Set <code>OWNER_PASSPHRASE</code> (at least 16 characters) and <code>SESSION_SECRET</code> (at least 32 characters) as Wrangler secrets.</li>
-    <li>Optional video, sound and assembly: set <code>FAL_KEY</code> as a Wrangler secret. Without it, image work and the library still function and the studio says those routes need a key.</li>
+    <li>Optional video, sound, edits and assembly: set <code>FAL_KEY</code> as a Wrangler secret. Without it, image work and the library still function and the studio says those routes need a key.</li>
+    <li>Optional App Composer entry: set <code>BRIDGE_SECRET</code> to the same value as Composer's <code>MEDIA_STUDIO_BRIDGE_SECRET</code>, and set <code>PUBLIC_ORIGIN</code>, <code>COMPOSER_ORIGIN</code> and <code>PUBLIC_STORY_URL</code>.</li>
     <li>Deploy with a clean pushed <code>main</code>. The guarded deploy runs the focused checks first.</li>
   </ol>
   <p class="small">No App Composer account, licence callback or hosted service is required after deployment.</p>

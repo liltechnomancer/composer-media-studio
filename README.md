@@ -11,13 +11,16 @@ Projects, uploads, thumbnails, the viewer, search and filters, renaming, downloa
 ## Generation
 
 - **Images** — Cloudflare Workers AI on this studio's own account. Studio Draft (SDXL Lightning) supports square, portrait, landscape and wide frames. Studio Detail (FLUX.2 klein) takes one selected still and makes a reference-guided variation.
+- **Edits** — fal.ai on this studio's own key. Studio Fill (`fal-ai/flux-pro/v1/fill`) takes a still and an exactly matching mask for a real inpaint; the same tool builds a 25% extended frame for outpaint. Studio Cutout (`fal-ai/birefnet/v2`) removes the background and returns a transparent PNG; Studio Upscale (`fal-ai/clarity-upscaler`) doubles the still. Every edit keeps the original and saves the result as a separate variant with its own hash.
 - **Video** — fal.ai through this studio's own key. Hailuo 2.3 Standard or Kling 2.5 Turbo Pro, image-to-video, 5–10 seconds. The job is asynchronous: submit, poll, copy the finished MP4 into this studio's R2.
-- **Sound** — fal.ai through the same key. Studio Score (`fal-ai/stable-audio`) makes a 30-second instrumental bed; Studio Voice (`fal-ai/elevenlabs/tts/eleven-v3`) narrates text supplied by the owner. Audio is saved as its own asset kind with a real duration, sample rate and channel count read from the bytes, and it can be published or used as a storyboard's bed.
+- **Sound** — fal.ai through the same key. Studio Score (`fal-ai/stable-audio`) makes a 10–30 second instrumental bed; Studio Voice (`fal-ai/elevenlabs/tts/eleven-v3`) narrates text supplied by the owner; Studio Effect (`fal-ai/elevenlabs/sound-effects/v2`) makes one short cue. Each is saved as its own audio asset with a real duration, sample rate and channel count read from the bytes, and can be published or used in a composition.
 - **Recipes** — five original starting points: editorial still, product plate, cinematic still, reference variation and animate a still. Controls state whether they map to a provider field or a prompt instruction.
 
 ## Storyboard and bounded assembly
 
-A composition is an ordered list of two to six saved clips (each at most 10.5 seconds, all of them at most 60 seconds) plus one optional saved audio bed. Saving a composition stores the manifest; rendering it creates one durable job that calls one bounded ffmpeg composition on fal.ai (`fal-ai/ffmpeg-api/compose`) and copies the assembled MP4 into this studio's R2. Editing a storyboard updates it in place and keeps every earlier render attached to it, so the interface can show that a cut has changed since its last render. Rendering again is a separate estimated request. A 9:16 cut is a second, clearly labelled assembly of the same takes and audio bed, ordered portrait-first so the frame is vertical; it is not a re-frame of the master. A storyboard with no portrait take refuses the 9:16 cut with that reason.
+A composition is an ordered list of two to six saved clips (each at most 10.5 seconds, all of them at most 60 seconds) plus a soundtrack of up to four saved music, narration or effect tracks. Trim, gain and fades are applied deterministically in the browser and saved as a new WAV; the separate tracks and their settings stay in the composition manifest. Rendering creates one durable job that calls one bounded ffmpeg composition on fal.ai (`fal-ai/ffmpeg-api/compose`) and copies the assembled MP4 into this studio's R2. Editing a storyboard updates it in place and keeps every earlier render attached to it, so the interface can show that a cut has changed since its last render. Rendering again is a separate estimated request.
+
+A 9:16 cut keeps the selected shot order. Its first stage merges the same takes into a true 1080 × 1920 frame with `fal-ai/ffmpeg-api/merge-videos`; the second composes that merged picture with the saved sound. It is not a renamed 4:5 file, a stretch, or a portrait-first re-sort of the edit.
 
 Studio Score takes a length of 10 to 30 seconds, so a generated bed can be chosen to fit the cut instead of being padded afterwards.
 
@@ -49,7 +52,8 @@ Optional public destinations: `PUBLIC_BUILD_URL` ("Build your own Media Studio")
 
 ## Ownership boundaries
 
-- One studio, one owner passphrase, HttpOnly signed session. There is no multi-tenant registration.
+- A standalone studio uses one owner passphrase and an HttpOnly signed session. There is no multi-tenant registration.
+- An installation opened from App Composer accepts a short-lived signed handoff naming the current actor, workspace, selected project and read/edit/generate/publish/admin actions. Privileged actions re-check the current Composer grant on the server; a revoked member stops the next dispatch. The Composer cookies and provider keys never reach this origin.
 - Media bytes live in the studio's R2 bucket; metadata in its D1 database.
 - Composer receives a source pin, not credentials. The studio runs after detaching Composer and has no licence callback.
 - Deleting media withdraws pages using it. A tombstone prevents a late provider result from restoring deleted media.

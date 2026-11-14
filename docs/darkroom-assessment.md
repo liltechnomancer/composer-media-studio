@@ -61,7 +61,7 @@ studio implements the same invariants in `src/lib/jobs.mjs`:
 - unknown outcomes keep their reservation and are never resubmitted;
 - tombstones survive late completion after deletion.
 
-This is a documented replacement of the machinery, not an unexamined one.
+This is a documented replacement of the machinery, not an unexamined one. The later edit and 9:16 additions keep the same authority: a fill, cutout or upscale is one generation row with its source and mask hashes; the 9:16 cut is one generation row whose first provider stage is a merge and whose second stage is the existing compose call, with the same reservation, retained bytes and tombstone rules.
 
 ## When to revisit
 

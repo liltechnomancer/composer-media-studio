@@ -136,6 +136,68 @@ export const models = {
     costBasis:
       "fal.ai estimate for one short ElevenLabs narration; the fal invoice, not this figure, is authoritative.",
   },
+  "studio-effect": {
+    id: "studio-effect",
+    label: "Studio Effect",
+    provider: PROVIDER_FAL,
+    endpoint: "fal-ai/elevenlabs/sound-effects/v2",
+    kind: "audio",
+    description:
+      "One short sound effect or atmosphere cue from a written description, using ElevenLabs' sound-effects model through fal.ai. Saved as its own asset so it can be mixed separately.",
+    audio: { mode: "effect", minSeconds: 1, maxSeconds: 15 },
+    references: 0,
+    costMicro: 8_000,
+    costBasis:
+      "Planning estimate for one short fal-hosted ElevenLabs sound effect; the fal invoice is authoritative.",
+  },
+  "studio-fill": {
+    id: "studio-fill",
+    label: "Studio Fill",
+    provider: PROVIDER_FAL,
+    endpoint: "fal-ai/flux-pro/v1/fill",
+    kind: "image",
+    edit: "fill",
+    description:
+      "A real masked fill or outpaint: paint the area to change, describe what belongs there, and FLUX Fill returns a new still. The original, mask and result are kept separately.",
+    aspects: ["match-reference"],
+    references: 1,
+    mask: true,
+    costMicro: 50_000,
+    costBasis:
+      "Planning estimate for one FLUX.1 Fill request on fal.ai; confirm current fal pricing before relying on it.",
+  },
+  "studio-cutout": {
+    id: "studio-cutout",
+    label: "Studio Cutout",
+    provider: PROVIDER_FAL,
+    endpoint: "fal-ai/birefnet/v2",
+    kind: "image",
+    edit: "cutout",
+    description:
+      "Background removal with a transparent PNG result, produced from the selected still. The original stays untouched.",
+    aspects: ["match-reference"],
+    references: 1,
+    promptRequired: false,
+    costMicro: 2_000,
+    costBasis:
+      "Planning estimate for one BiRefNet request on fal.ai; the fal invoice is authoritative.",
+  },
+  "studio-upscale": {
+    id: "studio-upscale",
+    label: "Studio Upscale",
+    provider: PROVIDER_FAL,
+    endpoint: "fal-ai/clarity-upscaler",
+    kind: "image",
+    edit: "upscale",
+    description:
+      "A two-times upscale of the selected still with a deterministic record of the source. It enhances detail; it does not invent missing footage.",
+    aspects: ["match-reference"],
+    references: 1,
+    promptRequired: false,
+    costMicro: 20_000,
+    costBasis:
+      "Planning estimate for one Clarity Upscaler request on fal.ai; the fal invoice is authoritative.",
+  },
   "studio-assembly": {
     id: "studio-assembly",
     label: "Studio Assembly",
@@ -153,18 +215,18 @@ export const models = {
   },
   "studio-social": {
     id: "studio-social",
-    label: "Studio Social Cut",
+    label: "Studio 9:16 Cut",
     provider: PROVIDER_FAL,
     endpoint: "fal-ai/ffmpeg-api/compose",
     kind: "video",
     render: "social",
     description:
-      "A 9:16 cut of the same takes and audio bed, assembled with the portrait takes first so the frame is vertical.",
+      "A true 1080 × 1920 cut of the same takes and audio bed. The selected shot order is preserved; the takes are fitted into a 9:16 frame rather than reordered.",
     aspects: ["social"],
     references: 0,
-    costMicro: 20_000,
+    costMicro: 40_000,
     costBasis:
-      "fal.ai shows ffmpeg compose at about US$0.0002 per output second; this flat figure is an estimate, not an invoice.",
+      "Two bounded fal requests (merge to 1080×1920, then compose with sound); this flat figure is an estimate, not an invoice.",
   },
 };
 
@@ -187,6 +249,9 @@ export function publicModels() {
     durations: model.durations ?? null,
     references: model.references,
     audio: model.audio ?? null,
+    edit: model.edit ?? null,
+    promptRequired: model.promptRequired !== false,
+    mask: Boolean(model.mask),
     render: model.render ?? null,
     provider:
       model.provider === PROVIDER_CLOUDFLARE
@@ -230,7 +295,8 @@ export function aspectDimensions(aspect, reference) {
 /** Validate settings against the selected model; never coerce silently. */
 export function validateSettings(model, input) {
   const prompt = String(input.prompt ?? "").trim();
-  if (!prompt) throw new HttpError(400, "Describe what you want to create");
+  const promptRequired = model.promptRequired !== false;
+  if (promptRequired && !prompt) throw new HttpError(400, "Describe what you want to create");
   if (prompt.length > 1800)
     throw new HttpError(400, "Keep the prompt under 1,800 characters");
 
@@ -238,6 +304,9 @@ export function validateSettings(model, input) {
     const aspect = String(input.aspect ?? model.aspects[0]);
     if (!model.aspects.includes(aspect))
       throw new HttpError(400, `${model.label} does not support the ${aspect} frame`);
+    if (model.edit) {
+      return { prompt, aspect, edit: model.edit };
+    }
     return { prompt, aspect };
   }
 
@@ -480,12 +549,79 @@ export async function submitAudio(env, model, settings) {
           output_format: "mp3_44100_128",
           enable_safety_checker: true,
         }
-      : {
-          prompt: settings.prompt,
-          seconds_total: settings.durationSeconds ?? model.audio.maxSeconds,
-          enable_safety_checker: true,
-        };
+      : model.audio.mode === "effect"
+        ? {
+            text: settings.prompt,
+            duration_seconds: settings.durationSeconds ?? 5,
+            prompt_influence: 0.4,
+            output_format: "mp3_44100_128",
+            enable_safety_checker: true,
+          }
+        : {
+            prompt: settings.prompt,
+            seconds_total: settings.durationSeconds ?? model.audio.maxSeconds,
+            enable_safety_checker: true,
+          };
   return falSubmit(env, model.endpoint, input);
+}
+
+/** Submit one masked fill, cutout or upscale request. Signed asset links stand
+ * in for provider-readable URLs; the owner session never leaves the studio. */
+export async function submitImageEdit(env, model, settings, references) {
+  const reference = references[0];
+  if (!reference?.url) throw new HttpError(400, "Select a still to edit");
+  const input = { image_url: reference.url, sync_mode: false };
+  if (model.edit === "fill") {
+    if (!reference.maskUrl)
+      throw new HttpError(400, "Draw or upload a mask before sending a fill request", "mask_required");
+    input.prompt = settings.prompt;
+    input.mask_url = reference.maskUrl;
+    input.output_format = "png";
+    input.safety_tolerance = "2";
+  } else if (model.edit === "cutout") {
+    input.output_format = "png";
+  } else if (model.edit === "upscale") {
+    input.prompt = settings.prompt || "masterpiece, best quality, highres";
+    input.upscale_factor = 2;
+    input.creativity = 0.25;
+    input.resemblance = 0.8;
+    input.enable_safety_checker = true;
+  } else {
+    throw new HttpError(400, "Choose a supported still edit");
+  }
+  return falSubmit(env, model.endpoint, input);
+}
+
+export async function readImageResult(env, generation) {
+  const response = await fetch(generation.provider_response_url, {
+    headers: { authorization: `Key ${falKey(env)}` },
+  });
+  if (!response.ok)
+    throw new HttpError(502, `Image edit result read failed (${response.status})`, "provider_error");
+  const payload = await response.json().catch(() => null);
+  const file = payload?.images?.[0] ?? payload?.image ?? payload?.mask_image;
+  if (!file?.url) throw new HttpError(502, "Image edit provider returned no image", "provider_invalid");
+  return { url: file.url, contentType: file.content_type ?? "image/png" };
+}
+
+/** Merge the ordered takes into a true 9:16 frame before sound is added. */
+export async function submitMerge(env, urls, { width = 1080, height = 1920 } = {}) {
+  return falSubmit(env, "fal-ai/ffmpeg-api/merge-videos", {
+    video_urls: urls,
+    resolution: { width, height },
+  });
+}
+
+export async function readMergeResult(env, generation) {
+  const response = await fetch(generation.provider_response_url, {
+    headers: { authorization: `Key ${falKey(env)}` },
+  });
+  if (!response.ok)
+    throw new HttpError(502, `Merge result read failed (${response.status})`, "provider_error");
+  const payload = await response.json().catch(() => null);
+  const file = payload?.video;
+  if (!file?.url) throw new HttpError(502, "Merge provider returned no video", "provider_invalid");
+  return { url: file.url, contentType: file.content_type ?? "video/mp4" };
 }
 
 export async function readAudioResult(env, generation) {
@@ -505,10 +641,11 @@ export async function submitAssembly(env, model, tracks) {
   return falSubmit(env, model.endpoint, { tracks });
 }
 
-/** The 9:16 cut is one compose call over the same takes, portrait first. The
- * output frame follows the first keyframe, which is why the order is explicit. */
+/** Retained for older callers. The portrait-first sort was the incomplete
+ * 4:5 workaround; a true 9:16 cut now merges the selected order into a
+ * 1080×1920 frame instead of changing the edit. */
 export function orderShotsForSocial(shots) {
-  return [...shots].sort((a, b) => Number(Boolean(b.portrait)) - Number(Boolean(a.portrait)));
+  return [...shots];
 }
 
 export async function readRenderResult(env, generation) {

@@ -14,12 +14,14 @@ const state = {
   recipes: [],
   videosConfigured: false,
   destinations: {},
+  session: null,
   filter: "all",
   query: "",
   create: null,
-  compose: { shotIds: [], audioAssetId: null, title: "", editingId: null },
+  compose: { shotIds: [], audioAssetId: null, audioTracks: [], title: "", editingId: null },
   busy: false,
   polling: null,
+  mask: null,
 };
 
 const esc = (value) =>
@@ -121,6 +123,11 @@ async function boot() {
     location.href = "/login";
     return;
   }
+  state.session = session;
+  if (!session.actions?.includes("read")) {
+    app.innerHTML = `<div class="card"><h1>This studio is not open to this account.</h1><p>The handoff did not include a current read grant. Ask the workspace owner for access, or read the public story.</p><div class="row">${session.composerOrigin ? `<a class="button" href="${esc(session.composerOrigin)}/media-studio/studio">Return to App Composer</a>` : ""}${session.storyUrl ? `<a class="button secondary" href="${esc(session.storyUrl)}">Read the story</a>` : ""}</div></div>`;
+    return;
+  }
   const data = await api("/api/state");
   state.projects = data.projects;
   state.models = data.models;
@@ -166,6 +173,7 @@ function defaultCreate() {
     aspect: aspectControl?.default ?? defaults.aspect ?? "portrait",
     durationSeconds: defaults.durationSeconds ?? 6,
     referenceAssetId: null,
+    maskAssetId: null,
     parentAssetId: null,
     controls,
   };
@@ -182,6 +190,10 @@ function recipeBySlug(slug) {
 function estimate() {
   const model = modelById(state.create?.model);
   if (!model) return 0;
+  if (model.kind === "audio" && model.audio?.mode === "music") {
+    const seconds = Number(state.create.durationSeconds ?? model.audio.maxSeconds);
+    return Math.max(1, Math.round((model.costMicro * seconds) / model.audio.maxSeconds));
+  }
   if (model.kind === "video" && model.costPerSecondMicro)
     return model.costPerSecondMicro * Number(state.create.durationSeconds ?? 6);
   return model.costMicro;
@@ -202,6 +214,7 @@ function render() {
   } else {
     app.innerHTML = projectView();
     attachDropzone();
+    if (state.tab === "create") attachMask();
   }
   drawWaveforms();
 }
@@ -349,6 +362,9 @@ function createView() {
   const images = state.project.assets.filter((asset) => asset.kind === "image");
   const selectedReference = images.find((asset) => asset.id === create.referenceAssetId);
   const needsReference = (model?.references ?? 0) > 0;
+  const needsMask = Boolean(model?.mask);
+  const maskAsset = create.maskAssetId ? state.project.assets.find((asset) => asset.id === create.maskAssetId) : null;
+  const promptRequired = model?.promptRequired !== false;
   const fundingBlocked = state.project.generations.some((generation) => generation.error?.code === "provider_funding");
   return `
     ${fundingBlocked ? `<p class="notice warn">The studio's video provider refused the last request for funding. Image work and the library still work; add credit to the studio's own provider account before starting another clip.</p>` : ""}
@@ -363,6 +379,11 @@ function createView() {
         <div class="recipe-grid">
           ${recipes.map((item) => `<button class="recipe" data-action="recipe" data-slug="${esc(item.slug)}" aria-pressed="${create.recipeSlug === item.slug}"><strong>${esc(item.title)}</strong><span>${esc(item.description)}</span><span class="small">${esc(item.kind === "video" ? "Image → video" : "Still image")}</span></button>`).join("")}
         </div>
+        <div class="row" style="margin-top:0.6rem" role="group" aria-label="Still edits">
+          <button class="secondary" data-action="edit-model" data-model="studio-fill" aria-pressed="${create.model === "studio-fill"}">Masked fill</button>
+          <button class="secondary" data-action="edit-model" data-model="studio-cutout" aria-pressed="${create.model === "studio-cutout"}">Remove background</button>
+          <button class="secondary" data-action="edit-model" data-model="studio-upscale" aria-pressed="${create.model === "studio-upscale"}">Upscale ×2</button>
+        </div>
         <hr style="border:0;border-top:1px solid var(--line);margin:1rem 0">
         <div class="stack">
           <label>Model
@@ -374,22 +395,37 @@ function createView() {
       <div class="card">
         <p class="eyebrow">2 · Direct the work</p>
         ${recipe ? recipeControls(recipe, create) : ""}
-        <label style="margin-top:0.7rem">${model?.kind === "audio" ? (model.audio?.mode === "speech" ? "Narration script" : "Describe the sound") : "Prompt"}
-          <textarea data-input="prompt" maxlength="1800" rows="6">${esc(create.prompt)}</textarea>
+        <label style="margin-top:0.7rem">${model?.kind === "audio" ? (model.audio?.mode === "speech" ? "Narration script" : model.audio?.mode === "effect" ? "Describe the effect" : "Describe the sound") : model?.edit ? (promptRequired ? "What belongs in the masked area?" : "Optional guidance") : "Prompt"}
+          <textarea data-input="prompt" maxlength="1800" rows="6" ${promptRequired ? "" : "placeholder=\"Optional\""}>${esc(create.prompt)}</textarea>
         </label>
-        ${model?.kind === "audio" ? `<p class="small" style="margin:0.3rem 0 0">${model.audio?.mode === "speech" ? "Use words you wrote or have the rights to. Narration is generated once and saved as audio you can publish or assemble." : "Instrumental music or atmosphere. The clip is 30 seconds and is saved as an audio asset with its duration and provenance."}</p>` : ""}
-        ${model?.kind === "image" ? `<label style="margin-top:0.6rem">Frame
+        ${model?.kind === "audio" ? `<p class="small" style="margin:0.3rem 0 0">${model.audio?.mode === "speech" ? "Use words you wrote or have the rights to. Narration is generated once and saved as audio you can publish or assemble." : model.audio?.mode === "effect" ? "One short cue, saved separately so it can sit beside music and narration in the mix." : "Instrumental music or atmosphere. The clip is saved as an audio asset with its duration and provenance."}</p>` : ""}
+        ${model?.kind === "image" && !model.edit ? `<label style="margin-top:0.6rem">Frame
           <select data-input="aspect">${model.aspects.map((aspect) => `<option value="${esc(aspect)}" ${create.aspect === aspect ? "selected" : ""}>${esc(aspect === "square" && model.references > 0 ? "Square variation" : aspect)}</option>`).join("")}</select>
         </label>` : ""}
+        ${model?.edit ? `<p class="small" style="margin:0.6rem 0 0"><strong>${esc(model.edit === "fill" ? "Masked fill or outpaint" : model.edit === "cutout" ? "Background removal" : "Two-times upscale")}</strong> · the result is saved as a separate variant; the source stays untouched.</p>` : ""}
         ${model?.kind === "video" ? `<label style="margin-top:0.6rem">Clip length
           <select data-input="duration">${model.durations.map((seconds) => `<option value="${seconds}" ${Number(create.durationSeconds) === seconds ? "selected" : ""}>${seconds} seconds</option>`).join("")}</select>
         </label>` : ""}
-        ${model?.kind === "audio" && model.audio?.mode === "music" ? `<label style="margin-top:0.6rem">Length
-          <select data-input="audioDuration">${[10, 15, 20, 25, 30].map((seconds) => `<option value="${seconds}" ${Number(create.durationSeconds) === seconds ? "selected" : ""}>${seconds} seconds</option>`).join("")}</select>
+        ${model?.kind === "audio" && (model.audio?.mode === "music" || model.audio?.mode === "effect") ? `<label style="margin-top:0.6rem">Length
+          <select data-input="audioDuration">${[10, 15, 20, 25, 30].filter((seconds) => seconds >= (model.audio.minSeconds ?? 1) && seconds <= (model.audio.maxSeconds ?? 30)).map((seconds) => `<option value="${seconds}" ${Number(create.durationSeconds) === seconds ? "selected" : ""}>${seconds} seconds</option>`).join("")}</select>
         </label>` : ""}
         ${needsReference ? `<div style="margin-top:0.8rem">
           <p class="small" style="margin-bottom:0.4rem"><strong>Reference still</strong> ${selectedReference ? `· ${esc(selectedReference.title)}` : "· none selected"}</p>
           <div class="row">${images.slice(0, 8).map((asset) => `<button class="quiet" data-action="pick-reference" data-id="${esc(asset.id)}" aria-pressed="${create.referenceAssetId === asset.id}" title="${esc(asset.title)}" style="padding:0;border:${create.referenceAssetId === asset.id ? "2px solid var(--accent)" : "2px solid transparent"};border-radius:8px;width:64px;height:64px;overflow:hidden"><img src="${esc(asset.file)}" alt="${esc(asset.title)}" style="width:100%;height:100%;object-fit:cover"></button>`).join("") || `<span class="small">Upload a still first.</span>`}</div>
+        </div>` : ""}
+        ${needsMask && selectedReference ? `<div class="mask-editor" style="margin-top:1rem">
+          <div class="spread"><p class="small" style="margin:0"><strong>Mask</strong> ${maskAsset ? `· ${esc(maskAsset.title)}` : "· paint the area to change"}</p><span class="small">White = replace</span></div>
+          <canvas id="mask-canvas" width="640" height="440" aria-label="Paint the area to change"></canvas>
+          <div class="row">
+            <label class="small" style="flex:1">Brush <input id="mask-brush" type="range" min="8" max="140" value="48"></label>
+            <button class="quiet" type="button" data-action="mask-clear">Clear</button>
+            <button class="secondary" type="button" data-action="mask-save" data-id="${esc(selectedReference.id)}">${maskAsset ? "Save new mask" : "Save mask"}</button>
+          </div>
+          <div class="row">
+            <button class="quiet" type="button" data-action="outpaint" data-id="${esc(selectedReference.id)}">Extend the frame instead</button>
+            ${maskAsset ? `<span class="small">Mask saved · ${esc(maskAsset.width)} × ${esc(maskAsset.height)}</span>` : ""}
+          </div>
+          <p class="small" style="margin:0">The studio scales the source and mask together before upload, so their dimensions always match. The original still remains in the library.</p>
         </div>` : ""}
       </div>
     </div>
@@ -399,7 +435,7 @@ function createView() {
           <p class="eyebrow" style="margin-bottom:0.2rem">3 · Review and submit</p>
           <p class="small" style="margin:0">${esc(model?.label ?? "No model")} · ${create.kind === "video" ? `${esc(String(create.durationSeconds))}s` : create.kind === "audio" ? (model?.audio?.mode === "speech" ? "narration" : `${esc(String(create.durationSeconds))}s`) : esc(create.aspect)} · estimated <strong>${money(estimate())}</strong></p>
         </div>
-        <button class="button" data-action="submit-create" ${needsReference && !create.referenceAssetId ? "disabled" : ""}>${create.kind === "video" ? "Animate this still" : create.kind === "audio" ? "Generate sound" : "Create image"} · ${money(estimate())}</button>
+        <button class="button" data-action="submit-create" ${(needsReference && !create.referenceAssetId) || (needsMask && !create.maskAssetId) || (promptRequired && !create.prompt.trim()) ? "disabled" : ""}>${create.kind === "video" ? "Animate this still" : create.kind === "audio" ? "Generate sound" : model?.edit === "fill" ? "Apply fill" : model?.edit === "cutout" ? "Remove background" : model?.edit === "upscale" ? "Upscale still" : "Create image"} · ${money(estimate())}</button>
       </div>
       <p class="small" style="margin:0.6rem 0 0">Each submit starts one new request. A repeat with the same request id is replayed, never charged twice. Video runs asynchronously; you can leave this page and come back.</p>
     </div>`;
@@ -456,13 +492,35 @@ function composeView() {
             </li>`).join("")}
           </ol>
         </div>
-        <label>Audio bed
-          <select data-compose="audio">
-            <option value="">No audio</option>
-            ${audio.map((asset) => `<option value="${esc(asset.id)}" ${compose.audioAssetId === asset.id ? "selected" : ""}>${esc(asset.title)} · ${asset.durationMs ? (asset.durationMs / 1000).toFixed(0) + "s" : "audio"}</option>`).join("")}
-          </select>
-        </label>
-        ${audio.length === 0 ? `<p class="small" style="margin:0">Upload or generate sound in Create to add a bed.</p>` : ""}
+        <div class="mixer">
+          <div class="spread"><p class="small" style="margin:0"><strong>Soundtrack</strong> · up to four saved tracks</p><span class="small">${compose.audioAssetId ? "mixed bed saved" : "not mixed yet"}</span></div>
+          ${compose.audioTracks.length === 0 ? `<p class="small" style="margin:0.4rem 0">Add music, narration or an effect. Trim, gain and fades are applied once in the browser and saved as a new WAV; the separate tracks stay as lineage.</p>` : ""}
+          ${compose.audioTracks.map((track, index) => {
+            const asset = audio.find((item) => item.id === track.assetId);
+            return `<div class="mix-row" data-mix-row="${index}">
+              <div class="spread">
+                <strong class="small">${index + 1}. ${esc(asset?.title ?? "Missing track")}</strong>
+                <button class="quiet" type="button" data-action="mix-remove" data-index="${index}">Remove</button>
+              </div>
+              <div class="mix-fields">
+                <label>Role<select data-mix="role" data-index="${index}">${["music", "voice", "effect"].map((role) => `<option value="${role}" ${track.role === role ? "selected" : ""}>${role}</option>`).join("")}</select></label>
+                <label>Start (ms)<input type="number" min="0" step="100" data-mix="startMs" data-index="${index}" value="${Number(track.startMs) || 0}"></label>
+                <label>Trim start (ms)<input type="number" min="0" step="100" data-mix="trimStartMs" data-index="${index}" value="${Number(track.trimStartMs) || 0}"></label>
+                <label>Trim end (ms)<input type="number" min="0" step="100" data-mix="trimEndMs" data-index="${index}" value="${Number(track.trimEndMs) || asset?.durationMs || 0}"></label>
+                <label>Gain (dB)<input type="range" min="-24" max="12" step="1" data-mix="gainDb" data-index="${index}" value="${Number(track.gainDb) || 0}"><span class="small">${Number(track.gainDb) || 0} dB</span></label>
+                <label>Fade in (ms)<input type="number" min="0" max="3000" step="100" data-mix="fadeInMs" data-index="${index}" value="${Number(track.fadeInMs) || 0}"></label>
+                <label>Fade out (ms)<input type="number" min="0" max="3000" step="100" data-mix="fadeOutMs" data-index="${index}" value="${Number(track.fadeOutMs) || 0}"></label>
+              </div>
+            </div>`;
+          }).join("")}
+          <div class="row" style="margin-top:0.6rem">
+            <select id="mix-add" aria-label="Add an audio track"><option value="">Choose a saved audio asset</option>${audio.map((asset) => `<option value="${esc(asset.id)}">${esc(asset.title)} · ${asset.durationMs ? (asset.durationMs / 1000).toFixed(0) + "s" : "audio"}</option>`).join("")}</select>
+            <button class="secondary" type="button" data-action="mix-add" ${compose.audioTracks.length >= 4 ? "disabled" : ""}>Add track</button>
+            <button class="button" type="button" data-action="mix-render" ${compose.audioTracks.length === 0 ? "disabled" : ""}>Mix soundtrack</button>
+          </div>
+          ${compose.audioAssetId ? `<p class="small" style="margin:0.4rem 0 0">Mixed bed: ${esc(audio.find((item) => item.id === compose.audioAssetId)?.title ?? compose.audioAssetId)}. Rendering uses this saved WAV; the separate tracks remain in the composition manifest.</p>` : ""}
+        </div>
+        ${audio.length === 0 ? `<p class="small" style="margin:0">Upload or generate sound in Create to add music, narration or an effect.</p>` : ""}
         <div class="row">
           <button class="button" data-action="compose-save" ${chosen.length < 2 || overLimit ? "disabled" : ""}>${compose.editingId ? "Save changes" : "Save storyboard"}</button>
           ${compose.editingId ? `<button class="quiet" data-action="compose-new">Start a new storyboard</button>` : ""}
@@ -495,13 +553,13 @@ function compositionCard(composition) {
   const pending = renders.some(isPending);
   return `<article class="job">
     <header>
-      <div class="row"><strong>${esc(composition.title)}</strong><span class="small">${composition.shots.length} shots · ${(composition.totalMs / 1000).toFixed(1)}s${composition.audioAssetId ? " · audio bed" : ""}</span></div>
+      <div class="row"><strong>${esc(composition.title)}</strong><span class="small">${composition.shots.length} shots · ${(composition.totalMs / 1000).toFixed(1)}s${composition.audioAssetId ? " · mixed bed" : ""}${composition.audioTracks?.length ? ` · ${composition.audioTracks.length} source tracks` : ""}</span></div>
       <span class="small">${dateLabel(composition.createdAt)}</span>
     </header>
     ${changedSinceRender(composition, renders) ? `<p class="small" style="margin:0"><strong>Changed since the last render.</strong> Render again to include the latest edits; earlier results are kept.</p>` : ""}
     <div class="row">
       <button class="button secondary" data-action="compose-render" data-variant="assembly" data-id="${esc(composition.id)}" ${pending ? "disabled" : ""}>Render master · ${money(renderEstimate("assembly"))}</button>
-      <button class="button secondary" data-action="compose-render" data-variant="social" data-id="${esc(composition.id)}" ${pending || !master ? "disabled" : ""} title="${master ? "The same takes and audio, assembled portrait-first for a vertical frame" : "Render a master first"}">Make 9:16 cut · ${money(renderEstimate("social"))}</button>
+      <button class="button secondary" data-action="compose-render" data-variant="social" data-id="${esc(composition.id)}" ${pending ? "disabled" : ""} title="The selected order, merged into a true 1080 × 1920 frame, then composed with the saved sound">Make 9:16 cut · ${money(renderEstimate("social"))}</button>
       <button class="quiet" data-action="compose-load" data-id="${esc(composition.id)}">Edit shots</button>
     </div>
     <div class="render-list">
@@ -519,7 +577,7 @@ function compositionCard(composition) {
         </div>`;
       }).join("")}
     </div>
-    ${social.length && master ? `<p class="small" style="margin:0">The 9:16 cut is its own portrait-first assembly of the same takes and audio bed, not a re-frame of the master and not a new generation of the clips.</p>` : ""}
+    ${social.length ? `<p class="small" style="margin:0">The 9:16 cut keeps the selected shot order and uses the same sound. Its first stage merges the takes into 1080 × 1920; the second adds the mix. It is not a rename or a stretch of the master.</p>` : ""}
   </article>`;
 }
 
@@ -672,6 +730,11 @@ function assetView() {
           <button class="secondary" data-action="animate-asset" data-id="${esc(asset.id)}" ${asset.kind === "image" ? "" : "disabled"}>Animate this still</button>
           <button class="secondary" data-action="publish-asset" data-id="${esc(asset.id)}">Publish page</button>
         </div>
+        ${asset.kind === "image" ? `<div class="row">
+          <button class="secondary" data-action="edit-asset" data-mode="fill" data-id="${esc(asset.id)}">Masked fill / outpaint</button>
+          <button class="secondary" data-action="edit-asset" data-mode="cutout" data-id="${esc(asset.id)}">Remove background</button>
+          <button class="secondary" data-action="edit-asset" data-mode="upscale" data-id="${esc(asset.id)}">Upscale ×2</button>
+        </div>` : ""}
         ${launchKitSource}
         ${isVideo && still ? `<p class="small" style="margin:0">A variation uses “${esc(still.title)}”, the still, not this clip.</p>` : ""}
         <button class="quiet" data-action="delete-asset" data-id="${esc(asset.id)}">Delete from library</button>
@@ -787,10 +850,124 @@ async function handleAction(action, element) {
       render();
       return;
     }
-    case "pick-reference":
-      state.create.referenceAssetId = id;
+    case "edit-model": {
+      const model = element.dataset.model;
+      state.create = {
+        ...defaultCreate(),
+        kind: "image",
+        model,
+        aspect: "match-reference",
+        recipeSlug: "",
+        prompt: model === "studio-fill" ? "" : model === "studio-upscale" ? "masterpiece, best quality, highres" : "",
+        controls: {},
+      };
       render();
       return;
+    }
+    case "pick-reference":
+      state.create.referenceAssetId = id;
+      if (state.create.maskAssetId) state.create.maskAssetId = null;
+      render();
+      return;
+    case "mask-clear": {
+      if (!maskPainter) return;
+      const { maskCanvas, canvas, sourceCanvas } = maskPainter;
+      maskCanvas.getContext("2d").fillStyle = "#000";
+      maskCanvas.getContext("2d").fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+      canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+      canvas.getContext("2d").drawImage(sourceCanvas, 0, 0);
+      return;
+    }
+    case "mask-save": {
+      if (!maskPainter) {
+        notify("Choose a still and let the mask canvas load first.", "bad");
+        return;
+      }
+      const { sourceCanvas, maskCanvas, sourceAsset } = maskPainter;
+      const sourceBlob = await maskedCanvasBlob(sourceCanvas);
+      const maskBlob = await maskedCanvasBlob(maskCanvas);
+      if (!sourceBlob || !maskBlob) {
+        notify("The mask could not be encoded. Try again.", "bad");
+        return;
+      }
+      try {
+        const scaled = await uploadBlob(
+          sourceBlob,
+          `Edit source — ${sourceAsset.title}`.slice(0, 100),
+          `Scaled to ${sourceCanvas.width} × ${sourceCanvas.height} for a same-size mask. Original ${sourceAsset.id} retained.`,
+        );
+        const mask = await uploadBlob(
+          maskBlob,
+          `Mask — ${sourceAsset.title}`.slice(0, 100),
+          `Painted in the studio. White marks the area to replace; black stays. Source ${sourceAsset.id}; ${sourceCanvas.width} × ${sourceCanvas.height}.`,
+        );
+        state.create.referenceAssetId = scaled.id;
+        state.create.maskAssetId = mask.id;
+        notify("Mask saved as its own asset. The fill will use it at the same dimensions.");
+        render();
+      } catch (error) {
+        notify(error.message, "bad");
+      }
+      return;
+    }
+    case "outpaint": {
+      const sourceAsset = state.project.assets.find((item) => item.id === id);
+      if (!sourceAsset) return;
+      const ok = await confirmAction(
+        "Extend the frame by 25%?",
+        "The studio will build a larger canvas with the original centred and a same-size mask around it, then FLUX Fill will invent the new border. The original still stays untouched.",
+        "Build the extended frame",
+      );
+      if (!ok) return;
+      const image = new Image();
+      image.crossOrigin = "anonymous";
+      image.onload = async () => {
+        const max = 768;
+        const scale = Math.min(1, max / Math.max(image.naturalWidth, image.naturalHeight));
+        const width = Math.max(64, Math.round(image.naturalWidth * scale));
+        const height = Math.max(64, Math.round(image.naturalHeight * scale));
+        const padX = Math.round(width * 0.25);
+        const padY = Math.round(height * 0.25);
+        const outWidth = Math.min(2048, width + padX * 2);
+        const outHeight = Math.min(2048, height + padY * 2);
+        const sourceCanvas = document.createElement("canvas");
+        sourceCanvas.width = outWidth;
+        sourceCanvas.height = outHeight;
+        const sourceContext = sourceCanvas.getContext("2d");
+        sourceContext.fillStyle = "#000";
+        sourceContext.fillRect(0, 0, outWidth, outHeight);
+        sourceContext.drawImage(image, padX, padY, width, height);
+        const maskCanvas = document.createElement("canvas");
+        maskCanvas.width = outWidth;
+        maskCanvas.height = outHeight;
+        const maskContext = maskCanvas.getContext("2d");
+        maskContext.fillStyle = "#fff";
+        maskContext.fillRect(0, 0, outWidth, outHeight);
+        maskContext.fillStyle = "#000";
+        maskContext.fillRect(padX, padY, width, height);
+        try {
+          const scaled = await uploadBlob(
+            await maskedCanvasBlob(sourceCanvas),
+            `Outpaint source — ${sourceAsset.title}`.slice(0, 100),
+            `Centred with a 25% border for a real outpaint. Original ${sourceAsset.id} retained.`,
+          );
+          const mask = await uploadBlob(
+            await maskedCanvasBlob(maskCanvas),
+            `Outpaint mask — ${sourceAsset.title}`.slice(0, 100),
+            `White border marks the new area; the original centre is black and preserved. Source ${sourceAsset.id}.`,
+          );
+          state.create.referenceAssetId = scaled.id;
+          state.create.maskAssetId = mask.id;
+          notify("Extended frame prepared. Prompt what belongs in the new border, then apply the fill.");
+          render();
+        } catch (error) {
+          notify(error.message, "bad");
+        }
+      };
+      image.onerror = () => notify("That still could not be opened for outpainting.", "bad");
+      image.src = sourceAsset.file;
+      return;
+    }
     case "submit-create":
       await submitCreate();
       return;
@@ -840,6 +1017,7 @@ async function handleAction(action, element) {
         aspect: generation.aspect ?? state.create.aspect,
         durationSeconds: generation.durationSeconds ?? state.create.durationSeconds,
         referenceAssetId: generation.referenceAssetId,
+        maskAssetId: generation.maskAssetId ?? null,
         parentAssetId: null,
       };
       state.tab = "create";
@@ -882,6 +1060,31 @@ async function handleAction(action, element) {
       };
       const recipe = recipeBySlug("reference-variation");
       state.create.prompt = promptFromRecipe(recipe, {});
+      state.tab = "create";
+      location.hash = `#/p/${state.projectId}/create`;
+      render();
+      return;
+    }
+    case "edit-asset": {
+      const mode = element.dataset.mode;
+      const source = state.project.assets.find((item) => item.id === id);
+      if (!source || source.kind !== "image") {
+        notify("Choose a still to edit.", "bad");
+        return;
+      }
+      const model = mode === "cutout" ? "studio-cutout" : mode === "upscale" ? "studio-upscale" : "studio-fill";
+      state.create = {
+        ...defaultCreate(),
+        kind: "image",
+        model,
+        aspect: "match-reference",
+        recipeSlug: "",
+        referenceAssetId: source.id,
+        maskAssetId: null,
+        parentAssetId: source.id,
+        prompt: mode === "fill" ? "" : mode === "cutout" ? "" : "masterpiece, best quality, highres",
+        controls: {},
+      };
       state.tab = "create";
       location.hash = `#/p/${state.projectId}/create`;
       render();
@@ -980,6 +1183,46 @@ async function handleAction(action, element) {
       render();
       return;
     }
+    case "mix-add": {
+      const select = document.querySelector("#mix-add");
+      const assetId = select?.value;
+      if (!assetId) {
+        notify("Choose an audio asset to add.", "bad");
+        return;
+      }
+      if (state.compose.audioTracks.some((track) => track.assetId === assetId)) {
+        notify("That track is already in the mix.", "bad");
+        return;
+      }
+      const asset = state.project.assets.find((item) => item.id === assetId);
+      state.compose.audioTracks.push({
+        assetId,
+        role: "music",
+        startMs: 0,
+        trimStartMs: 0,
+        trimEndMs: Number(asset?.durationMs) || 0,
+        gainDb: 0,
+        fadeInMs: 0,
+        fadeOutMs: 0,
+      });
+      state.compose.audioAssetId = null;
+      render();
+      return;
+    }
+    case "mix-remove": {
+      state.compose.audioTracks.splice(Number(element.dataset.index), 1);
+      state.compose.audioAssetId = null;
+      render();
+      return;
+    }
+    case "mix-render": {
+      try {
+        await mixSoundtrack();
+      } catch (error) {
+        notify(error.message, "bad");
+      }
+      return;
+    }
     case "compose-add":
       if (state.compose.shotIds.includes(id)) return;
       state.compose.shotIds = [...state.compose.shotIds, id];
@@ -1006,6 +1249,7 @@ async function handleAction(action, element) {
         title,
         shots: state.compose.shotIds.map((shotId) => ({ assetId: shotId })),
         audioAssetId: state.compose.audioAssetId || null,
+        audioTracks: state.compose.audioTracks,
       };
       const editingId = state.compose.editingId;
       if (editingId) {
@@ -1031,7 +1275,7 @@ async function handleAction(action, element) {
       return;
     }
     case "compose-new":
-      state.compose = { shotIds: [], audioAssetId: null, title: "", editingId: null };
+      state.compose = { shotIds: [], audioAssetId: null, audioTracks: [], title: "", editingId: null };
       render();
       return;
     case "compose-load": {
@@ -1040,6 +1284,7 @@ async function handleAction(action, element) {
       state.compose = {
         shotIds: composition.shots.map((shot) => shot.assetId),
         audioAssetId: composition.audioAssetId ?? null,
+        audioTracks: composition.audioTracks ?? [],
         title: composition.title,
         editingId: composition.id,
       };
@@ -1057,7 +1302,7 @@ async function handleAction(action, element) {
       const estimateMicro = renderEstimate(variant);
       const ok = await confirmAction(
         variant === "social" ? "Make a 9:16 cut?" : "Render this storyboard?",
-        `${variant === "social" ? "The same takes and audio bed, assembled with portrait takes first so the frame is vertical." : `${composition.shots.length} clips, ${(composition.totalMs / 1000).toFixed(1)}s assembled.`} Estimated ${money(estimateMicro)}. The participating files are copied to the render provider for this job only.`,
+        `${variant === "social" ? `The same ${composition.shots.length} takes in the order you chose, merged into a true 1080 × 1920 frame, then composed with the saved sound.` : `${composition.shots.length} clips, ${(composition.totalMs / 1000).toFixed(1)}s assembled.`} Estimated ${money(estimateMicro)}. The participating files are copied to the render provider for this job only.`,
         `Render · ${money(estimateMicro)}`,
       );
       if (!ok) return;
@@ -1105,7 +1350,7 @@ async function saveSettings(overrides = {}) {
 async function submitCreate() {
   const create = state.create;
   const model = modelById(create.model);
-  if (!create.prompt.trim()) {
+  if (model?.promptRequired !== false && !create.prompt.trim()) {
     notify("Describe what you want to create.", "bad");
     return;
   }
@@ -1113,9 +1358,13 @@ async function submitCreate() {
     notify("Choose the reference still first.", "bad");
     return;
   }
+  if (model?.mask && !create.maskAssetId) {
+    notify("Save a mask before sending the fill. The studio will not guess which pixels to replace.", "bad");
+    return;
+  }
   const ok = await confirmAction(
-    `Start one new ${create.kind === "video" ? "video" : create.kind === "audio" ? "audio" : "image"} request?`,
-    `${model.label} · ${create.kind === "video" ? `${create.durationSeconds}s` : create.kind === "audio" ? (model.audio?.mode === "speech" ? "narration" : "30s") : create.aspect} · estimated ${money(estimate())}. This can incur provider charges. Repeating the same request replays it instead of billing twice.`,
+    `Start one new ${create.kind === "video" ? "video" : create.kind === "audio" ? "audio" : model?.edit ? "edit" : "image"} request?`,
+    `${model.label} · ${create.kind === "video" ? `${create.durationSeconds}s` : create.kind === "audio" ? (model.audio?.mode === "speech" ? "narration" : `${create.durationSeconds}s`) : model?.edit ? model.edit : create.aspect} · estimated ${money(estimate())}. This can incur provider charges. Repeating the same request replays it instead of billing twice.`,
     `Create · ${money(estimate())}`,
   );
   if (!ok) return;
@@ -1128,9 +1377,10 @@ async function submitCreate() {
       model: create.model,
       recipeId: create.recipeSlug,
       prompt: create.prompt,
-      aspect: create.kind === "image" ? create.aspect : create.kind === "video" ? "from-image" : undefined,
-      durationSeconds: create.kind === "video" || (create.kind === "audio" && model?.audio?.mode === "music") ? Number(create.durationSeconds) : undefined,
+      aspect: create.kind === "image" ? (model?.edit ? "match-reference" : create.aspect) : create.kind === "video" ? "from-image" : undefined,
+      durationSeconds: create.kind === "video" || (create.kind === "audio" && model?.audio?.mode !== "speech") ? Number(create.durationSeconds) : undefined,
       referenceAssetId: create.kind === "audio" ? undefined : create.referenceAssetId,
+      maskAssetId: model?.mask ? create.maskAssetId : undefined,
       parentAssetId: create.parentAssetId,
       clientRequestId,
     }),
@@ -1272,6 +1522,192 @@ function attachDropzone() {
   });
 }
 
+async function uploadBlob(blob, title, caption = "") {
+  const form = new FormData();
+  const extension = blob.type === "image/png" ? "png" : blob.type === "audio/wav" ? "wav" : "bin";
+  form.set("file", new File([blob], `${title.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.${extension}`, { type: blob.type }));
+  form.set("title", title.slice(0, 100));
+  form.set("caption", caption.slice(0, 400));
+  const response = await fetch(`/api/projects/${state.projectId}/assets`, {
+    method: "POST",
+    credentials: "same-origin",
+    body: form,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload?.error?.message ?? `Upload failed (${response.status})`);
+  state.project.assets.unshift(payload.asset);
+  return payload.asset;
+}
+
+/* ---------- mask and outpaint ---------- */
+
+let maskPainter = null;
+
+function attachMask() {
+  const canvas = document.querySelector("#mask-canvas");
+  const create = state.create;
+  if (!canvas || !create?.referenceAssetId) return;
+  const asset = state.project.assets.find((item) => item.id === create.referenceAssetId);
+  if (!asset) return;
+  const source = new Image();
+  source.crossOrigin = "anonymous";
+  source.onload = () => {
+    const max = 1024;
+    const scale = Math.min(1, max / Math.max(source.naturalWidth, source.naturalHeight));
+    const width = Math.max(64, Math.round(source.naturalWidth * scale));
+    const height = Math.max(64, Math.round(source.naturalHeight * scale));
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#000";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(source, 0, 0, width, height);
+    const sourceCanvas = document.createElement("canvas");
+    sourceCanvas.width = width;
+    sourceCanvas.height = height;
+    sourceCanvas.getContext("2d").drawImage(source, 0, 0, width, height);
+    const maskCanvas = document.createElement("canvas");
+    maskCanvas.width = width;
+    maskCanvas.height = height;
+    const maskContext = maskCanvas.getContext("2d");
+    maskContext.fillStyle = "#000";
+    maskContext.fillRect(0, 0, width, height);
+
+    let drawing = false;
+    let brush = Number(document.querySelector("#mask-brush")?.value ?? 48);
+    const point = (event) => {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: ((event.clientX - rect.left) / rect.width) * canvas.width,
+        y: ((event.clientY - rect.top) / rect.height) * canvas.height,
+      };
+    };
+    const paint = (event) => {
+      if (!drawing) return;
+      const { x, y } = point(event);
+      for (const context of [canvas.getContext("2d"), maskContext]) {
+        context.save();
+        context.fillStyle = "#fff";
+        context.beginPath();
+        context.arc(x, y, brush / 2, 0, Math.PI * 2);
+        context.fill();
+        context.restore();
+      }
+    };
+    canvas.addEventListener("pointerdown", (event) => {
+      drawing = true;
+      canvas.setPointerCapture(event.pointerId);
+      paint(event);
+    });
+    canvas.addEventListener("pointermove", paint);
+    canvas.addEventListener("pointerup", () => {
+      drawing = false;
+    });
+    canvas.addEventListener("pointercancel", () => {
+      drawing = false;
+    });
+    document.querySelector("#mask-brush")?.addEventListener("input", (event) => {
+      brush = Number(event.target.value);
+    });
+    maskPainter = { canvas, sourceCanvas, maskCanvas, sourceAsset: asset };
+  };
+  source.onerror = () => notify("That still could not be opened for masking.", "bad");
+  source.src = asset.file;
+}
+
+function maskedCanvasBlob(canvas) {
+  return new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+}
+
+/* ---------- deterministic soundtrack mix ---------- */
+
+function encodeWav(buffer) {
+  const channels = buffer.numberOfChannels;
+  const frames = buffer.length;
+  const bytes = 44 + frames * channels * 2;
+  const view = new DataView(new ArrayBuffer(bytes));
+  const write = (offset, text) => {
+    for (let index = 0; index < text.length; index += 1) view.setUint8(offset + index, text.charCodeAt(index));
+  };
+  write(0, "RIFF");
+  view.setUint32(4, bytes - 8, true);
+  write(8, "WAVE");
+  write(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, buffer.sampleRate, true);
+  view.setUint32(28, buffer.sampleRate * channels * 2, true);
+  view.setUint16(32, channels * 2, true);
+  view.setUint16(34, 16, true);
+  write(36, "data");
+  view.setUint32(40, frames * channels * 2, true);
+  const data = Array.from({ length: channels }, (_, channel) => buffer.getChannelData(channel));
+  let offset = 44;
+  for (let frame = 0; frame < frames; frame += 1) {
+    for (let channel = 0; channel < channels; channel += 1) {
+      const sample = Math.max(-1, Math.min(1, data[channel][frame] || 0));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += 2;
+    }
+  }
+  return new Blob([view.buffer], { type: "audio/wav" });
+}
+
+async function mixSoundtrack() {
+  const tracks = state.compose.audioTracks;
+  if (!tracks.length) {
+    notify("Add at least one audio track first.", "bad");
+    return;
+  }
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) {
+    notify("This browser cannot mix audio offline. Use a browser with the Web Audio API.", "bad");
+    return;
+  }
+  const totalMs = Math.max(
+    1000,
+    state.compose.shotIds.reduce((sum, id) => sum + (state.project.assets.find((asset) => asset.id === id)?.durationMs || 0), 0),
+  );
+  const sampleRate = 44100;
+  const context = new OfflineAudioContext(2, Math.ceil((totalMs / 1000) * sampleRate), sampleRate);
+  notify("Mixing the soundtrack…");
+  for (const track of tracks) {
+    const asset = state.project.assets.find((item) => item.id === track.assetId);
+    if (!asset) continue;
+    const response = await fetch(asset.file, { credentials: "same-origin" });
+    if (!response.ok) throw new Error(`Could not read ${asset.title} for the mix.`);
+    const decoded = await context.decodeAudioData(await response.arrayBuffer());
+    const trimStart = Math.max(0, Number(track.trimStartMs) || 0) / 1000;
+    const trimEnd = Math.min(decoded.duration, (Number(track.trimEndMs) || decoded.duration * 1000) / 1000);
+    const duration = Math.max(0.05, trimEnd - trimStart);
+    const start = Math.max(0, Number(track.startMs) || 0) / 1000;
+    const source = context.createBufferSource();
+    source.buffer = decoded;
+    const gain = context.createGain();
+    const level = Math.pow(10, (Number(track.gainDb) || 0) / 20);
+    const fadeIn = Math.min(duration, Math.max(0, Number(track.fadeInMs) || 0) / 1000);
+    const fadeOut = Math.min(duration, Math.max(0, Number(track.fadeOutMs) || 0) / 1000);
+    gain.gain.setValueAtTime(fadeIn > 0 ? 0.0001 : level, start);
+    if (fadeIn > 0) gain.gain.linearRampToValueAtTime(level, start + fadeIn);
+    gain.gain.setValueAtTime(level, Math.max(start + fadeIn, start + duration - fadeOut));
+    if (fadeOut > 0) gain.gain.linearRampToValueAtTime(0.0001, start + duration);
+    source.connect(gain).connect(context.destination);
+    source.start(start, trimStart, duration);
+  }
+  const rendered = await context.startRendering();
+  const wav = encodeWav(rendered);
+  const title = `Mixed soundtrack — ${state.compose.title.trim() || "storyboard"}`.slice(0, 100);
+  const asset = await uploadBlob(
+    wav,
+    title,
+    `Deterministic browser mix of ${tracks.length} saved track${tracks.length === 1 ? "" : "s"} (${tracks.map((track) => track.role).join(", ")}). Sources and settings are kept in the composition.`,
+  );
+  state.compose.audioAssetId = asset.id;
+  notify("Mixed bed saved as a new WAV. Rendering will use it; the separate tracks remain.");
+  render();
+}
+
 /* ---------- audio waveforms ---------- */
 
 const waveformCache = new Map();
@@ -1353,6 +1789,17 @@ app.addEventListener("click", async (event) => {
 });
 
 app.addEventListener("change", async (event) => {
+  const mix = event.target.closest("[data-mix]");
+  if (mix) {
+    const index = Number(mix.dataset.index);
+    const track = state.compose.audioTracks[index];
+    if (!track) return;
+    const key = mix.dataset.mix;
+    track[key] = key === "role" ? mix.value : Number(mix.value);
+    state.compose.audioAssetId = null;
+    render();
+    return;
+  }
   const composeField = event.target.closest("[data-compose]");
   if (composeField) {
     if (composeField.dataset.compose === "audio") {
@@ -1377,6 +1824,7 @@ app.addEventListener("change", async (event) => {
     if (model.kind === "video" && !model.durations.includes(Number(state.create.durationSeconds)))
       state.create.durationSeconds = model.durations[0];
     if ((model.references ?? 0) === 0) state.create.referenceAssetId = null;
+    if (!model.mask) state.create.maskAssetId = null;
     render();
     return;
   }

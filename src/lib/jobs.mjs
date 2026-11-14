@@ -14,13 +14,16 @@ import {
   estimateCost,
   getModel,
   readAudioResult,
+  readImageResult,
+  readMergeResult,
   readRenderResult,
-  orderShotsForSocial,
   readVideoResult,
   readVideoStatus,
   runImage,
   submitAssembly,
   submitAudio,
+  submitImageEdit,
+  submitMerge,
   submitVideo,
   validateSettings,
   cancelVideo,
@@ -177,6 +180,23 @@ export async function createGeneration(env, project, input) {
   if (model.references === 0 && reference)
     throw new HttpError(400, `${model.label} does not take a reference image`);
 
+  let mask = null;
+  if (model.edit === "fill") {
+    mask = await referenceFor(env, project.id, input.maskAssetId);
+    if (!mask) throw new HttpError(400, "Draw or upload a mask before sending a fill request", "mask_required");
+    if (
+      reference.width && reference.height && mask.width && mask.height &&
+      (reference.width !== mask.width || reference.height !== mask.height)
+    )
+      throw new HttpError(
+        400,
+        "The mask must be exactly the same width and height as the selected still. Reopen the mask tool; the studio will not stretch it for you.",
+        "mask_mismatch",
+      );
+    if (input.maskAssetId === input.referenceAssetId)
+      throw new HttpError(400, "The mask must be a separate saved image", "mask_mismatch");
+  }
+
   const cost = estimateCost(model, settings);
   const generationId = id("gen");
   const timestamp = now();
@@ -197,6 +217,8 @@ export async function createGeneration(env, project, input) {
           ...settings,
           referenceAssetId: reference?.asset.id ?? null,
           referenceSha256: reference?.asset.sha256 ?? null,
+          maskAssetId: mask?.asset.id ?? null,
+          maskSha256: mask?.asset.sha256 ?? null,
           parentAssetId: input.parentAssetId ?? null,
         }),
         cost,
@@ -248,6 +270,32 @@ export async function dispatchGeneration(env, generation) {
 
   if (!(await claim(env, generation.id, "admitted", "submitting"))) {
     return loadGeneration(env, generation.id);
+  }
+
+  if (model.kind === "image" && model.edit) {
+    try {
+      const referenceUrl = await signRenderLink(env, {
+        assetId: reference.asset.id,
+        projectId: generation.project_id,
+      });
+      const maskUrl = request.maskAssetId
+        ? await signRenderLink(env, {
+            assetId: request.maskAssetId,
+            projectId: generation.project_id,
+          })
+        : null;
+      const submitted = await submitImageEdit(env, model, request, [
+        { url: referenceUrl, maskUrl },
+      ]);
+      await env.DB.prepare(
+        "UPDATE generations SET status='submitted',provider_request_id=?2,provider_status_url=?3,provider_response_url=?4,submitted_at=?5,updated_at=?5 WHERE id=?1 AND status='submitting'",
+      )
+        .bind(generation.id, submitted.requestId, submitted.statusUrl, submitted.responseUrl, now())
+        .run();
+      return loadGeneration(env, generation.id);
+    } catch (error) {
+      return failGeneration(env, generation, error, { dispatched: true });
+    }
   }
 
   if (model.kind === "image") {
@@ -343,7 +391,11 @@ export async function saveGeneration(env, generation, bytes, format) {
   await env.MEDIA.put(assetKey, bytes, { httpMetadata: { contentType: mime } });
   const kind = kindForMime(mime);
   const size = sizeForBytes(mime, bytes);
-  const source = getModel(fresh.model)?.render ? "assembled" : "generated";
+  const source = getModel(fresh.model)?.render
+    ? "assembled"
+    : getModel(fresh.model)?.edit
+      ? "variant"
+      : "generated";
   const timestamp = now();
   try {
     await env.DB.prepare(
@@ -366,12 +418,22 @@ export async function saveGeneration(env, generation, bytes, format) {
         fresh.model === "studio-assembly"
           ? text(request.title ?? "", 100, "Title", { required: false }) || "Assembled cut"
           : fresh.model === "studio-social"
-            ? "9:16 social cut"
+            ? "1080 × 1920 cut"
             : builtinRecipe(request.recipeId)?.title ??
-              (kind === "audio" ? "Generated audio" : kind === "video" ? "Generated clip" : "Generated still"),
+              (getModel(fresh.model)?.edit === "fill"
+                ? "Masked fill"
+                : getModel(fresh.model)?.edit === "cutout"
+                  ? "Background removed"
+                  : getModel(fresh.model)?.edit === "upscale"
+                    ? "Upscaled still"
+                    : kind === "audio"
+                      ? "Generated audio"
+                      : kind === "video"
+                        ? "Generated clip"
+                        : "Generated still"),
         String(request.prompt ?? "").slice(0, 400),
         source,
-        request.parentAssetId ?? null,
+        request.parentAssetId ?? request.referenceAssetId ?? null,
         generation.id,
         timestamp,
       )
@@ -475,7 +537,13 @@ export async function advanceGeneration(env, generation) {
   }
 
   const providerState = status.status.toUpperCase();
-  if (providerState === "COMPLETED") return completeJob(env, fresh, status);
+  if (providerState === "COMPLETED") {
+    const model = getModel(fresh.model);
+    const request = safeJson(fresh.request_json, {});
+    if (model.render === "social" && request.stage === "merge")
+      return completeMergeStage(env, fresh, status);
+    return completeJob(env, fresh, status);
+  }
   if (providerState === "CANCELLED" || providerState === "CANCELED") {
     await env.DB.prepare("UPDATE generations SET status='cancelled',cancelled_at=?2,updated_at=?2 WHERE id=?1")
       .bind(fresh.id, now())
@@ -508,6 +576,98 @@ function formatForMime(mime) {
   return "jpeg";
 }
 
+/** Stage one of the true 9:16 cut: merge the selected takes into a 1080×1920
+ * frame without reordering them, then submit the same sound plan as a compose
+ * job whose visual track is that merged file. */
+async function completeMergeStage(env, generation, status) {
+  const model = getModel(generation.model);
+  const request = safeJson(generation.request_json, {});
+  let merged;
+  try {
+    merged = await readMergeResult(env, {
+      ...generation,
+      provider_response_url: status.responseUrl,
+    });
+  } catch (error) {
+    await env.DB.prepare(
+      "UPDATE generations SET error_code='merge_unavailable',error_detail=?2,updated_at=?3 WHERE id=?1",
+    )
+      .bind(generation.id, String(error.message ?? error).slice(0, 200), now())
+      .run();
+    return loadGeneration(env, generation.id);
+  }
+
+  const tracks = [
+    {
+      id: "visual",
+      type: "video",
+      keyframes: [
+        { timestamp: 0, duration: Number(request.totalMs), url: merged.url },
+      ],
+    },
+  ];
+  tracks.push(...(await audioTracksForRender(env, generation.project_id, request)));
+
+  try {
+    const submitted = await submitAssembly(env, model, tracks);
+    const nextRequest = {
+      ...request,
+      stage: "compose",
+      mergedVideoUrl: merged.url,
+      mergedWidth: 1080,
+      mergedHeight: 1920,
+    };
+    await env.DB.prepare(
+      "UPDATE generations SET request_json=?2,status='submitted',provider_request_id=?3,provider_status_url=?4,provider_response_url=?5,submitted_at=?6,updated_at=?6,error_code=NULL,error_detail=NULL WHERE id=?1",
+    )
+      .bind(
+        generation.id,
+        JSON.stringify(nextRequest),
+        submitted.requestId,
+        submitted.statusUrl,
+        submitted.responseUrl,
+        now(),
+      )
+      .run();
+    return loadGeneration(env, generation.id);
+  } catch (error) {
+    return failGeneration(env, generation, error, { dispatched: true });
+  }
+}
+
+async function audioTracksForRender(env, projectId, request) {
+  const tracks = [];
+  const push = async (assetId, { startMs = 0, durationMs, role = "audio" }) => {
+    const asset = await loadAssetRow(env, projectId, assetId);
+    if (!asset) throw new HttpError(409, "A selected audio track is no longer in this project", "audio_unavailable");
+    const duration = Math.max(1, Number(durationMs) || Number(asset.duration_ms) || 1);
+    tracks.push({
+      id: `audio-${tracks.length + 1}-${role}`.slice(0, 60),
+      type: "audio",
+      keyframes: [
+        {
+          timestamp: Math.max(0, Number(startMs) || 0),
+          duration,
+          url: await signRenderLink(env, { assetId: asset.id, projectId }),
+        },
+      ],
+    });
+  };
+
+  if (request.audioAssetId) {
+    await push(request.audioAssetId, { durationMs: request.totalMs, role: "mix" });
+    return tracks;
+  }
+  for (const track of request.audioTracks ?? []) {
+    await push(track.assetId, {
+      startMs: track.startMs,
+      durationMs: Number(track.trimEndMs) - Number(track.trimStartMs),
+      role: track.role,
+    });
+  }
+  return tracks;
+}
+
 /** Read the finished provider result, copy its bytes, then save. Model-specific
  * because audio, stills and renders return different result shapes. */
 async function completeJob(env, generation, status) {
@@ -530,7 +690,9 @@ async function completeJob(env, generation, status) {
     result =
       model.kind === "audio"
         ? await readAudioResult(env, providerGeneration)
-        : await readRenderResult(env, providerGeneration);
+        : model.kind === "image" && model.edit
+          ? await readImageResult(env, providerGeneration)
+          : await readRenderResult(env, providerGeneration);
   } catch (error) {
     await env.DB.prepare("UPDATE generations SET error_code='result_unavailable',error_detail=?2,updated_at=?3 WHERE id=?1")
       .bind(generation.id, String(error.message).slice(0, 200), now())
@@ -552,7 +714,13 @@ async function completeJob(env, generation, status) {
       ? download.contentType.includes("wav")
         ? "wav"
         : "mp3"
-      : "mp4";
+      : model.kind === "image"
+        ? download.contentType.includes("png")
+          ? "png"
+          : download.contentType.includes("webp")
+            ? "webp"
+            : "jpeg"
+        : "mp4";
   return saveGeneration(env, generation, download.bytes, format);
 }
 
@@ -666,7 +834,62 @@ export async function buildCompositionSpec(env, project, input) {
     audioAssetId = audio.id;
   }
 
-  return { title, shots: manifest, audioAssetId, totalMs };
+  const audioTracks = [];
+  if (input.audioTracks !== undefined) {
+    if (!Array.isArray(input.audioTracks) || input.audioTracks.length > 4)
+      throw new HttpError(400, "A mix takes up to four saved audio tracks", "invalid_audio");
+    for (const [index, track] of input.audioTracks.entries()) {
+      if (!track || typeof track !== "object" || Array.isArray(track))
+        throw new HttpError(400, "Each audio track needs an asset and a role", "invalid_audio");
+      const audio = await loadAssetRow(env, project.id, String(track.assetId ?? ""));
+      if (!audio || audio.kind !== "audio")
+        throw new HttpError(400, "Every audio track must be a saved audio asset in this project", "invalid_audio");
+      const role = ["music", "voice", "effect"].includes(track.role) ? track.role : "music";
+      const durationMs = Number(audio.duration_ms);
+      if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 30 * 60 * 1000)
+        throw new HttpError(400, "That audio track is not a bounded saved asset", "invalid_audio");
+      const trimStartMs = Math.max(0, Math.round(Number(track.trimStartMs) || 0));
+      const trimEndMs = Math.min(
+        durationMs,
+        Math.round(Number(track.trimEndMs) || durationMs),
+      );
+      if (trimEndMs - trimStartMs < 250)
+        throw new HttpError(400, "Keep at least a quarter second of each audio track", "invalid_audio");
+      const gainDb = Number(track.gainDb ?? 0);
+      if (!Number.isFinite(gainDb) || gainDb < -24 || gainDb > 12)
+        throw new HttpError(400, "Track gain must stay between -24 dB and +12 dB", "invalid_audio");
+      const fadeInMs = Math.max(0, Math.round(Number(track.fadeInMs) || 0));
+      const fadeOutMs = Math.max(0, Math.round(Number(track.fadeOutMs) || 0));
+      if (fadeInMs > 3000 || fadeOutMs > 3000 || fadeInMs + fadeOutMs > trimEndMs - trimStartMs)
+        throw new HttpError(400, "Fades must fit inside the trimmed track and stay under three seconds", "invalid_audio");
+      const startMs = Math.max(0, Math.round(Number(track.startMs) || 0));
+      if (startMs >= totalMs)
+        throw new HttpError(400, "An audio track cannot start after the picture ends", "invalid_audio");
+      audioTracks.push({
+        assetId: audio.id,
+        role,
+        startMs,
+        trimStartMs,
+        trimEndMs,
+        gainDb: Math.round(gainDb * 10) / 10,
+        fadeInMs,
+        fadeOutMs,
+      });
+      if (audioTracks.length !== index + 1) throw new HttpError(400, "Keep audio tracks in order", "invalid_audio");
+    }
+    if (audioTracks.some((track) => track.trimStartMs || track.gainDb || track.fadeInMs || track.fadeOutMs || track.startMs) && !audioAssetId) {
+      // The compose endpoint has no per-track in-point, gain or fade fields.
+      // The interface mixes those deterministically in the browser and saves
+      // the result as audioAssetId; a direct API caller must do the same.
+      throw new HttpError(
+        400,
+        "Trim, gain, fades and offsets need a rendered mix. Use the studio's Mix soundtrack control, which saves the mixed WAV first; the separate tracks stay as lineage.",
+        "mix_required",
+      );
+    }
+  }
+
+  return { title, shots: manifest, audioAssetId, audioTracks, totalMs };
 }
 
 export async function createComposition(env, project, input) {
@@ -715,19 +938,12 @@ export async function createRender(env, project, composition, input) {
     .first();
   if (existing) return { generation: existing, created: false };
 
-  const spec = safeJson(composition.spec_json, { shots: [], audioAssetId: null, totalMs: 0 });
+  const spec = safeJson(composition.spec_json, { shots: [], audioAssetId: null, audioTracks: [], totalMs: 0 });
   if (model.render === "social") {
-    const portrait = [];
-    for (const shot of spec.shots ?? []) {
-      const asset = await loadAssetRow(env, project.id, shot.assetId);
-      if (asset && Number(asset.height) > Number(asset.width)) portrait.push(shot.assetId);
-    }
-    if (!portrait.length)
-      throw new HttpError(
-        400,
-        "A 9:16 cut needs at least one portrait take in this storyboard",
-        "no_portrait_shot",
-      );
+    // A 9:16 cut keeps the selected order. The merge stage fits every take into
+    // 1080 × 1920 rather than sorting portrait shots to the front.
+    if ((spec.shots ?? []).length < 2)
+      throw new HttpError(400, "A 9:16 cut needs at least two saved takes", "no_shots");
   }
 
   const cost = model.costMicro;
@@ -750,9 +966,11 @@ export async function createRender(env, project, composition, input) {
           title: composition.title,
           shots: spec.shots,
           audioAssetId: spec.audioAssetId ?? null,
+          audioTracks: spec.audioTracks ?? [],
           totalMs: spec.totalMs,
           variant: model.render,
-          renderStep: 1,
+          stage: model.render === "social" ? "merge" : "compose",
+          renderStep: model.render === "social" ? 2 : 1,
         }),
         cost,
         cost,
@@ -802,10 +1020,10 @@ export async function dispatchRender(env, generation) {
         portrait: Number(asset.height) > Number(asset.width),
       });
     }
-    const ordered = model.render === "social" ? orderShotsForSocial(shots) : shots;
+    // The selected order is the edit. Never sort it for a frame size.
     const keyframes = [];
     let cursor = 0;
-    for (const shot of ordered) {
+    for (const shot of shots) {
       keyframes.push({
         timestamp: cursor,
         duration: shot.durationMs,
@@ -813,22 +1031,23 @@ export async function dispatchRender(env, generation) {
       });
       cursor += shot.durationMs;
     }
-    const tracks = [{ id: "visual", type: "video", keyframes }];
-    if (request.audioAssetId) {
-      const audio = await loadAssetRow(env, generation.project_id, request.audioAssetId);
-      if (!audio) throw new HttpError(409, "The selected audio is no longer in this project", "audio_unavailable");
-      tracks.push({
-        id: "audio",
-        type: "audio",
-        keyframes: [
-          {
-            timestamp: 0,
-            duration: cursor,
-            url: await signRenderLink(env, { assetId: audio.id, projectId: generation.project_id }),
-          },
-        ],
-      });
+
+    if (model.render === "social") {
+      const submitted = await submitMerge(
+        env,
+        keyframes.map((keyframe) => keyframe.url),
+        { width: 1080, height: 1920 },
+      );
+      await env.DB.prepare(
+        "UPDATE generations SET status='submitted',provider_request_id=?2,provider_status_url=?3,provider_response_url=?4,submitted_at=?5,updated_at=?5 WHERE id=?1 AND status='submitting'",
+      )
+        .bind(generation.id, submitted.requestId, submitted.statusUrl, submitted.responseUrl, now())
+        .run();
+      return loadGeneration(env, generation.id);
     }
+
+    const tracks = [{ id: "visual", type: "video", keyframes }];
+    tracks.push(...(await audioTracksForRender(env, generation.project_id, request)));
     const submitted = await submitAssembly(env, model, tracks);
     await env.DB.prepare(
       "UPDATE generations SET status='submitted',provider_request_id=?2,provider_status_url=?3,provider_response_url=?4,submitted_at=?5,updated_at=?5 WHERE id=?1 AND status='submitting'",

@@ -1,6 +1,17 @@
 // MIT. Media Studio Worker: owner studio, public pages and the job engine.
 
-import { checkLoginRate, clearCookie, createSession, readBridgeToken, recordLoginFailure, requireOwner, sessionCookie, verifyPassphrase } from "./lib/auth.mjs";
+import {
+  allowedActions,
+  checkLoginRate,
+  clearCookie,
+  createSession,
+  readBridgeToken,
+  readSession,
+  recordLoginFailure,
+  requireSession,
+  sessionCookie,
+  verifyPassphrase,
+} from "./lib/auth.mjs";
 import {
   advanceGeneration,
   budgetSnapshot,
@@ -127,6 +138,8 @@ function generationView(generation, extra = {}) {
     aspect: request.aspect ?? null,
     durationSeconds: request.durationSeconds ?? null,
     referenceAssetId: request.referenceAssetId ?? null,
+    maskAssetId: request.maskAssetId ?? null,
+    maskSha256: request.maskSha256 ?? null,
     parentAssetId: request.parentAssetId ?? null,
     costEstimateMicro: generation.cost_estimate_micro,
     costObservedMicro: generation.cost_observed_micro,
@@ -182,7 +195,7 @@ async function handleLogin(request, env) {
     const token = await createSession(env);
     return json({ ok: true }, 200, { "set-cookie": sessionCookie(token) });
   }
-  return new Response(loginPage({ next: "/", revision: BUILD.revision, bridged: Boolean(env.BRIDGE_SECRET) }), {
+  return new Response(loginPage({ next: "/", revision: BUILD.revision, bridged: Boolean(env.BRIDGE_SECRET), composerOrigin: env.COMPOSER_ORIGIN, storyUrl: env.PUBLIC_STORY_URL }), {
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
   });
 }
@@ -202,17 +215,66 @@ async function handleApi(request, env, url) {
     const input = await body(request);
     const claim = await readBridgeToken(env, input.token);
     if (!claim) throw new HttpError(401, "This Composer handoff is not valid or has expired", "unauthorized");
-    const token = await createSession(env);
-    return json({ ok: true, next: "/" }, 200, { "set-cookie": sessionCookie(token) });
+    const token = await createSession(env, {
+      mode: "bridge",
+      actor: claim.actor,
+      actorName: claim.actorName,
+      workspace: claim.workspace,
+      workspaceName: claim.workspaceName,
+      project: claim.project,
+      actions: claim.actions,
+      revision: claim.revision,
+    });
+    return json(
+      {
+        ok: true,
+        next: "/",
+        actor: claim.actorName ?? claim.actor,
+        workspace: claim.workspaceName ?? claim.workspace,
+        project: claim.project,
+        actions: claim.actions,
+      },
+      200,
+      { "set-cookie": sessionCookie(token, "bridge") },
+    );
   }
 
   if (path === "/api/session") {
-    const { readSession } = await import("./lib/auth.mjs");
     const session = await readSession(env, request);
-    return json({ signedIn: Boolean(session) });
+    return json({
+      signedIn: Boolean(session),
+      mode: session?.mode ?? null,
+      actor: session?.actorName ?? session?.actor ?? null,
+      workspace: session?.workspaceName ?? session?.workspace ?? null,
+      project: session?.project ?? null,
+      actions: allowedActions(session),
+      composerOrigin: typeof env.COMPOSER_ORIGIN === "string" ? env.COMPOSER_ORIGIN : null,
+      storyUrl: typeof env.PUBLIC_STORY_URL === "string" ? env.PUBLIC_STORY_URL : null,
+    });
   }
 
-  await requireOwner(env, request);
+  // Every private route declares the action it needs. A project-scoped bridge
+  // session cannot read or change another project, even with a valid cookie.
+  const projectIdFromPath = (path.match(/^\/api\/(?:projects|assets)\/([a-z0-9_]+)/) ?? [])[1] ?? null;
+  let action = method === "GET" || method === "HEAD" ? "read" : "edit";
+  if (path === "/api/state" || path === "/api/models") action = "read";
+  if (path === "/api/projects" && method === "POST") action = "edit";
+  if (/\/generations$/.test(path) && method === "POST") action = "generate";
+  if (/\/render$/.test(path) && method === "POST") action = "generate";
+  if (/\/publish$/.test(path) && method === "POST") action = "publish";
+  if (/^\/api\/publications\//.test(path)) action = "publish";
+  if (/^\/api\/generations\/[a-z0-9_]+$/.test(path) && method === "DELETE") action = "edit";
+  if (/^\/api\/generations\/[a-z0-9_]+\/(cancel|reconcile|save-retry)$/.test(path)) action = "generate";
+  if (/\/export$/.test(path)) action = "read";
+
+  const session = await requireSession(env, request, action);
+  if (session.mode === "bridge" && session.project && projectIdFromPath && session.project !== projectIdFromPath)
+    throw new HttpError(
+      403,
+      "This studio session is scoped to another project. Reopen the project from App Composer.",
+      "forbidden",
+    );
+
   if (method !== "GET" && method !== "HEAD") assertSameOrigin(request, env);
 
   if (path === "/api/models" && method === "GET")
@@ -899,28 +961,48 @@ async function handlePublic(request, env, url) {
     const token = url.searchParams.get("token");
     const claim = await readBridgeToken(env, token);
     if (!claim)
-      return new Response(loginPage({ next: "/", revision: BUILD.revision, bridged: Boolean(env.BRIDGE_SECRET) }), {
+      return new Response(loginPage({ next: "/", revision: BUILD.revision, bridged: Boolean(env.BRIDGE_SECRET), composerOrigin: env.COMPOSER_ORIGIN, storyUrl: env.PUBLIC_STORY_URL }), {
         status: 401,
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
       });
-    const session = await createSession(env);
-    return new Response(null, { status: 302, headers: { location: "/", "set-cookie": sessionCookie(session), "cache-control": "no-store" } });
+    const session = await createSession(env, {
+      mode: "bridge",
+      actor: claim.actor,
+      actorName: claim.actorName,
+      workspace: claim.workspace,
+      workspaceName: claim.workspaceName,
+      project: claim.project,
+      actions: claim.actions,
+      revision: claim.revision,
+    });
+    return new Response(null, {
+      status: 302,
+      headers: {
+        location: "/",
+        "set-cookie": sessionCookie(session, "bridge"),
+        "cache-control": "no-store",
+      },
+    });
   }
 
   if (path === "/login") return handleLogin(request, env);
   if (path === "/help") {
-    return new Response(helpPage(), {
+    return new Response(helpPage({ composerOrigin: env.COMPOSER_ORIGIN, storyUrl: env.PUBLIC_STORY_URL }), {
       headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=3600" },
     });
   }
   if (path === "/" || path === "/studio") {
-    const { readSession } = await import("./lib/auth.mjs");
     const session = await readSession(env, request);
-    if (!session && path !== "/login")
-      return new Response(loginPage({ next: "/", revision: BUILD.revision, bridged: Boolean(env.BRIDGE_SECRET) }), {
+    if (!session)
+      return new Response(loginPage({ next: "/", revision: BUILD.revision, bridged: Boolean(env.BRIDGE_SECRET), composerOrigin: env.COMPOSER_ORIGIN, storyUrl: env.PUBLIC_STORY_URL }), {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
       });
-    return new Response(shell({ revision: BUILD.revision }), {
+    return new Response(shell({
+      revision: BUILD.revision,
+      session,
+      composerOrigin: env.COMPOSER_ORIGIN,
+      storyUrl: env.PUBLIC_STORY_URL,
+    }), {
       headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
     });
   }

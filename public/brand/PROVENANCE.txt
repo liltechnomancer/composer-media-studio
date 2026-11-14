@@ -1,0 +1,14 @@
+Installation-owned App Composer identity
+
+composer-mark.svg and composer-icon-tile.svg are copies of App Composer's
+approved canonical mark (public/brand/composer-icon-20261022b.svg and
+public/brand/composer-icon-tile-20261022b.svg) from the loftwah/app-composer
+repository at 5e91b35f02ecd0603d916675c0b1ab67cc0f14fd. They are used only as
+the installation identity for this Media Studio, not as a new studio logo.
+
+space-grotesk.woff2 is the bundled Space Grotesk Latin subset from the same
+App Composer repository (OFL-Space-Grotesk.txt carries the licence). It is
+self-hosted here so the studio does not call a font CDN.
+
+Media Studio's own work remains MIT. The App Composer name and mark identify
+the installation; other owners replacing this directory keep their own identity.

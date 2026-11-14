@@ -15,7 +15,7 @@ import {
 import { getModel, publicModels, validateSettings } from "../src/lib/providers.mjs";
 import { signRenderLink, verifyRenderLink } from "../src/lib/render-links.mjs";
 import { audioInfo, sniffMedia } from "../src/lib/util.mjs";
-import { addAsset, mp3FrameHeader, setup, wav } from "./harness.mjs";
+import { addAsset, jpeg, mp3FrameHeader, setup, wav } from "./harness.mjs";
 
 test("audio duration and format come from the bytes", () => {
   const wavBytes = wav({ seconds: 3, sampleRate: 22050, channels: 2, bits: 16 });
@@ -151,42 +151,82 @@ test("the same render request replays instead of dispatching twice", async () =>
   assert.equal(results[0].n, 1);
 });
 
-test("a 9:16 cut needs a portrait take and orders it first", async () => {
+test("a 9:16 cut keeps the selected order and needs no portrait take", async () => {
   const { env, project } = await setup();
   await addAsset(env, project, { id: "asset_clip01", kind: "video", durationMs: 6000 });
   await addAsset(env, project, { id: "asset_clip02", kind: "video", durationMs: 6000 });
-  const landscape = await createComposition(env, project, {
+  const composition = await createComposition(env, project, {
     title: "Cut",
-    shots: [{ assetId: "asset_clip01" }, { assetId: "asset_clip02" }],
+    shots: [{ assetId: "asset_clip02" }, { assetId: "asset_clip01" }],
   });
-  await assert.rejects(
-    createRender(env, project, { id: landscape.id, ...landscape, spec_json: JSON.stringify(landscape) }, {
-      model: "studio-social",
-      clientRequestId: "req_social0001",
-    }),
-    /portrait take/,
-  );
-
-  // A portrait take makes the same storyboard eligible; the dispatch order puts
-  // it first so the composed frame is vertical.
-  await env.DB.prepare(
-    "INSERT INTO assets(id,project_id,kind,r2_key,mime,bytes,width,height,duration_ms,sha256,title,caption,source,created_at,updated_at) VALUES('asset_tall1','?','video','k','video/mp4',10,768,960,5000,'h','Tall','','generated',1,1)".replace("'?'", "'" + project.id + "'"),
-  ).run();
-  const portrait = await createComposition(env, project, {
-    title: "Cut, portrait",
-    shots: [{ assetId: "asset_clip01" }, { assetId: "asset_tall1" }],
-  });
-  const created = await createRender(env, project, { id: portrait.id, ...portrait, spec_json: JSON.stringify(portrait) }, {
+  const row = { id: composition.id, ...composition, spec_json: JSON.stringify(composition) };
+  const created = await createRender(env, project, row, {
     model: "studio-social",
-    clientRequestId: "req_social0002",
+    clientRequestId: "req_social0001",
   });
   assert.equal(created.created, true);
+  const manifest = JSON.parse(created.generation.request_json);
+  assert.deepEqual(manifest.shots.map((shot) => shot.assetId), ["asset_clip02", "asset_clip01"]);
+  assert.equal(manifest.stage, "merge");
+
+  // The old helper must no longer reorder the edit.
   const { orderShotsForSocial } = await import("../src/lib/providers.mjs");
   const ordered = orderShotsForSocial([
-    { assetId: "asset_clip01", portrait: false },
-    { assetId: "asset_tall1", portrait: true },
+    { assetId: "asset_clip02", portrait: false },
+    { assetId: "asset_clip01", portrait: true },
   ]);
-  assert.deepEqual(ordered.map((shot) => shot.assetId), ["asset_tall1", "asset_clip01"]);
+  assert.deepEqual(ordered.map((shot) => shot.assetId), ["asset_clip02", "asset_clip01"]);
+});
+
+test("a fill rejects a mask that does not match the still", async () => {
+  const { env, project } = await setup();
+  await addAsset(env, project, { id: "asset_sourceimg", kind: "image", r2Key: "source.png" });
+  await addAsset(env, project, { id: "asset_maskimg", kind: "image", r2Key: "mask.png" });
+  await env.DB.prepare("UPDATE assets SET mime='image/png', width=1024, height=1024 WHERE id='asset_sourceimg'").run();
+  await env.DB.prepare("UPDATE assets SET mime='image/png', width=1280, height=720 WHERE id='asset_maskimg'").run();
+  await env.MEDIA.put("source.png", jpeg(1024, 1024));
+  await env.MEDIA.put("mask.png", jpeg(1280, 720));
+  await assert.rejects(
+    createGeneration(env, project, {
+      kind: "image",
+      model: "studio-fill",
+      recipeId: "freeform",
+      prompt: "A replacement sky",
+      aspect: "match-reference",
+      referenceAssetId: "asset_sourceimg",
+      maskAssetId: "asset_maskimg",
+      clientRequestId: "req_fill000001",
+    }),
+    /same width and height/,
+  );
+});
+
+test("trim, gain and fades need a saved mix instead of being silently ignored", async () => {
+  const { env, project } = await setup();
+  await addAsset(env, project, { id: "asset_clip01", kind: "video", durationMs: 6000 });
+  await addAsset(env, project, { id: "asset_clip02", kind: "video", durationMs: 6000 });
+  await addAsset(env, project, { id: "asset_audio1", kind: "audio", durationMs: 30000 });
+  await assert.rejects(
+    buildCompositionSpec(env, project, {
+      title: "Mix",
+      shots: [{ assetId: "asset_clip01" }, { assetId: "asset_clip02" }],
+      audioTracks: [
+        { assetId: "asset_audio1", role: "music", gainDb: -4, fadeInMs: 500, trimEndMs: 12000 },
+      ],
+    }),
+    /rendered mix/,
+  );
+  const spec = await buildCompositionSpec(env, project, {
+    title: "Mix with a bed",
+    shots: [{ assetId: "asset_clip01" }, { assetId: "asset_clip02" }],
+    audioAssetId: "asset_audio1",
+    audioTracks: [
+      { assetId: "asset_audio1", role: "music", gainDb: -4, fadeInMs: 500, fadeOutMs: 800, trimEndMs: 12000 },
+    ],
+  });
+  assert.equal(spec.audioTracks.length, 1);
+  assert.equal(spec.audioTracks[0].gainDb, -4);
+  assert.equal(spec.audioTracks[0].fadeOutMs, 800);
 });
 
 test("render links are short-lived and bound to one asset and project", async () => {

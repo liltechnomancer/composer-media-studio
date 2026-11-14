@@ -1,0 +1,113 @@
+// MIT. Focused checks for the Composer handoff and per-action studio session.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  allowedActions,
+  createSession,
+  readBridgeToken,
+  readSession,
+  requireSession,
+} from "../src/lib/auth.mjs";
+
+const env = {
+  SESSION_SECRET: "test-session-secret-that-is-long-enough",
+  BRIDGE_SECRET: "test-bridge-secret-that-is-also-long-enough",
+  COMPOSER_ORIGIN: "https://composer.test",
+};
+
+function encode(value) {
+  return btoa(JSON.stringify(value)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+async function sign(secret, payload) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+  return [...new Uint8Array(signature)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function bridge(claim) {
+  const payload = encode(claim);
+  return `${payload}.${await sign(env.BRIDGE_SECRET, payload)}`;
+}
+
+function requestWith(token) {
+  return new Request("https://studio.test/api/state", {
+    headers: { cookie: `studio_session=${token}` },
+  });
+}
+
+test("a bridge token carries the actor, workspace, project and actions", async () => {
+  const token = await bridge({
+    aud: "media-studio",
+    sub: "acct-123",
+    actorName: "A Person",
+    workspace: "ws-personal",
+    workspaceName: "Personal",
+    project: "prj_abc123",
+    actions: ["read", "generate"],
+    revision: 4,
+    exp: Date.now() + 60_000,
+  });
+  const claim = await readBridgeToken(env, token);
+  assert.equal(claim.actor, "acct-123");
+  assert.equal(claim.workspace, "ws-personal");
+  assert.equal(claim.project, "prj_abc123");
+  assert.deepEqual(claim.actions, ["read", "generate"]);
+  assert.equal(claim.revision, 4);
+});
+
+test("a tampered or expired bridge token is refused", async () => {
+  const token = await bridge({
+    aud: "media-studio",
+    sub: "acct-123",
+    workspace: "ws-personal",
+    actions: ["read"],
+    exp: Date.now() + 60_000,
+  });
+  assert.equal(await readBridgeToken(env, token.replace(/.$/, "0")), null);
+  const expired = await bridge({
+    aud: "media-studio",
+    sub: "acct-123",
+    workspace: "ws-personal",
+    actions: ["read"],
+    exp: Date.now() - 1000,
+  });
+  assert.equal(await readBridgeToken(env, expired), null);
+  const wrongAudience = await bridge({
+    aud: "something-else",
+    sub: "acct-123",
+    workspace: "ws-personal",
+    actions: ["read"],
+    exp: Date.now() + 60_000,
+  });
+  assert.equal(await readBridgeToken(env, wrongAudience), null);
+});
+
+test("a session only exposes its granted actions", async () => {
+  const token = await createSession(env, {
+    mode: "bridge",
+    actor: "acct-123",
+    workspace: "ws-personal",
+    project: "prj_abc123",
+    actions: ["read", "generate"],
+    revision: 2,
+  });
+  const session = await readSession(env, requestWith(token));
+  assert.deepEqual(allowedActions(session), ["read", "generate"]);
+  await assert.rejects(() => requireSession(env, requestWith(token), "publish"), /publish permission/);
+  await assert.rejects(() => requireSession(env, requestWith(token), "edit"), /edit permission/);
+});
+
+test("an owner session keeps the full action set", async () => {
+  const token = await createSession(env, { mode: "owner", actor: "owner" });
+  const session = await readSession(env, requestWith(token));
+  assert.equal(session.mode, "owner");
+  assert.deepEqual(allowedActions(session), ["read", "edit", "generate", "publish", "admin"]);
+});
