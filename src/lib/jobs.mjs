@@ -426,7 +426,11 @@ export async function saveGeneration(env, generation, bytes, format) {
                   : getModel(fresh.model)?.edit === "upscale"
                     ? "Upscaled still"
                     : kind === "audio"
-                      ? "Generated audio"
+                      ? fresh.model === "studio-effect"
+                        ? "Generated effect"
+                        : fresh.model === "studio-voice"
+                          ? "Generated narration"
+                          : "Generated music"
                       : kind === "video"
                         ? "Generated clip"
                         : "Generated still"),
