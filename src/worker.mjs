@@ -32,7 +32,7 @@ import { publicModels } from "./lib/providers.mjs";
 import { builtinRecipe, projectRecipes, renderPrompt, builtinRecipes } from "./lib/recipes.mjs";
 import { reuseStillFor, sharingDestinations } from "./lib/sharing.mjs";
 import { shell, loginPage, publicPage, notFoundPage, helpPage } from "./lib/ui.mjs";
-import { verifyRenderLink } from "./lib/render-links.mjs";
+import { signRenderLink, verifyRenderLink } from "./lib/render-links.mjs";
 import {
   audioInfo,
   escapeHtml,
@@ -565,13 +565,18 @@ async function handleApi(request, env, url) {
     }
   }
 
-  const assetMatch = path.match(/^\/api\/assets\/([a-z0-9_]+)(?:\/(file|download|publish))?$/);
+  const assetMatch = path.match(/^\/api\/assets\/([a-z0-9_]+)(?:\/(file|download|publish|render-link))?$/);
   if (assetMatch) {
     const [, assetId, action] = assetMatch;
     const asset = await env.DB.prepare("SELECT * FROM assets WHERE id=?1").bind(assetId).first();
     if (!asset) throw new HttpError(404, "Asset not found", "not_found");
 
     if (!action && method === "GET") return json({ asset: assetView(asset) });
+
+    if (action === "render-link" && method === "GET") {
+      const link = await signRenderLink(env, { assetId: asset.id, projectId: asset.project_id });
+      return json({ link, expiresInSeconds: 1800 });
+    }
 
     if (!action && method === "PATCH") {
       if (asset.deleted_at) throw new HttpError(410, "This asset was deleted", "deleted");
