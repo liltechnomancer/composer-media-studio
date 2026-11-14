@@ -773,9 +773,19 @@ function ask({ title, copy, fields = [], submit = "Continue" }) {
         .join("")}`;
     const form = confirmDialog.querySelector("#confirm-form");
     form.querySelector('button[value="ok"]').textContent = submit;
+    // A previous submission must not turn an Escape or backdrop dismissal into OK.
+    confirmDialog.returnValue = "";
+    const onBackdrop = (event) => {
+      if (event.target !== confirmDialog) return;
+      const rect = confirmDialog.getBoundingClientRect();
+      if (event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom) return;
+      // Do not silently discard anything typed into a form.
+      const edited = [...form.querySelectorAll("input, textarea, select")].some((input) => input.value !== input.defaultValue);
+      if (!edited) confirmDialog.close("cancel");
+    };
     const finish = (value) => {
-      confirmDialog.close();
       confirmDialog.removeEventListener("close", onClose);
+      confirmDialog.removeEventListener("click", onBackdrop);
       resolve(value);
     };
     const onClose = () => {
@@ -787,6 +797,7 @@ function ask({ title, copy, fields = [], submit = "Continue" }) {
       } else finish(null);
     };
     confirmDialog.addEventListener("close", onClose);
+    confirmDialog.addEventListener("click", onBackdrop);
     confirmDialog.showModal();
   });
 }

@@ -118,7 +118,7 @@ ${header({ session, composerOrigin, storyUrl, woodhouseShare })}
     <h2 id="confirm-title">Confirm</h2>
     <div id="confirm-copy"></div>
     <div class="row end">
-      <button value="cancel" class="secondary">Keep editing</button>
+      <button value="cancel" class="secondary" formnovalidate>Cancel</button>
       <button value="ok" class="button">Continue</button>
     </div>
   </form>
