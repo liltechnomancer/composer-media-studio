@@ -188,6 +188,7 @@ legend { padding: 0 0.4rem; font-weight: 600; font-size: 0.85rem; }
 
 .recipe-grid { display: grid; gap: 0.8rem; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 .recipe { text-align: left; display: grid; gap: 0.35rem; padding: 0.9rem; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); cursor: pointer; }
+.recipe:hover { background: var(--paper-deep); border-color: var(--ink); }
 .recipe[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .recipe strong { font-family: var(--display); font-size: 1.05rem; }
 .recipe span { font-size: 0.84rem; color: var(--ink-soft); }
