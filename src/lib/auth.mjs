@@ -76,6 +76,9 @@ export async function readSession(env, request) {
   try {
     const session = decode(payload);
     if (!session || session.expires < now()) return null;
+    // Owner sessions minted before the scoped-entry release have no mode. They
+    // are still the standalone owner, not an empty bridge grant.
+    if (!session.mode && session.actor === "owner") session.mode = "owner";
     session.actions = session.mode === "owner" ? [...ACTIONS] : normaliseActions(session.actions);
     return session;
   } catch {
