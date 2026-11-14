@@ -15,7 +15,6 @@ import {
   getModel,
   readAudioResult,
   readImageResult,
-  readMergeResult,
   readRenderResult,
   readVideoResult,
   readVideoStatus,
@@ -23,7 +22,6 @@ import {
   submitAssembly,
   submitAudio,
   submitImageEdit,
-  submitMerge,
   submitVideo,
   validateSettings,
   cancelVideo,
@@ -540,8 +538,8 @@ export async function advanceGeneration(env, generation) {
   if (providerState === "COMPLETED") {
     const model = getModel(fresh.model);
     const request = safeJson(fresh.request_json, {});
-    if (model.render === "social" && request.stage === "merge")
-      return completeMergeStage(env, fresh, status);
+    if (model.render === "social" && request.stage === "slate")
+      return completeSocialStage(env, fresh, status);
     return completeJob(env, fresh, status);
   }
   if (providerState === "CANCELLED" || providerState === "CANCELED") {
@@ -576,46 +574,53 @@ function formatForMime(mime) {
   return "jpeg";
 }
 
-/** Stage one of the true 9:16 cut: merge the selected takes into a 1080×1920
- * frame without reordering them, then submit the same sound plan as a compose
- * job whose visual track is that merged file. */
-async function completeMergeStage(env, generation, status) {
+/** Stage one of the true 9:16 cut: compose a deliberate 1080×1920 slate, then
+ * submit the selected takes in their chosen order after it. The slate makes the
+ * output frame 9:16 without re-sorting the edit or stretching a 4:5 master. */
+async function completeSocialStage(env, generation, status) {
   const model = getModel(generation.model);
   const request = safeJson(generation.request_json, {});
-  let merged;
+  const SLATE_MS = 1000;
+  let slate;
   try {
-    merged = await readMergeResult(env, {
+    slate = await readRenderResult(env, {
       ...generation,
       provider_response_url: status.responseUrl,
     });
   } catch (error) {
     await env.DB.prepare(
-      "UPDATE generations SET error_code='merge_unavailable',error_detail=?2,updated_at=?3 WHERE id=?1",
+      "UPDATE generations SET error_code='slate_unavailable',error_detail=?2,updated_at=?3 WHERE id=?1",
     )
       .bind(generation.id, String(error.message ?? error).slice(0, 200), now())
       .run();
     return loadGeneration(env, generation.id);
   }
 
-  const tracks = [
-    {
-      id: "visual",
-      type: "video",
-      keyframes: [
-        { timestamp: 0, duration: Number(request.totalMs), url: merged.url },
-      ],
-    },
-  ];
-  tracks.push(...(await audioTracksForRender(env, generation.project_id, request)));
+  const keyframes = [{ timestamp: 0, duration: SLATE_MS, url: slate.url }];
+  let cursor = SLATE_MS;
+  for (const shot of request.shots ?? []) {
+    const asset = await loadAssetRow(env, generation.project_id, shot.assetId);
+    if (!asset) return failGeneration(env, generation, new HttpError(409, "A selected shot is no longer in this project", "shot_unavailable"), { dispatched: true });
+    keyframes.push({
+      timestamp: cursor,
+      duration: Number(shot.durationMs),
+      url: await signRenderLink(env, { assetId: asset.id, projectId: generation.project_id }),
+    });
+    cursor += Number(shot.durationMs);
+  }
+  const tracks = [{ id: "visual", type: "video", keyframes }];
+  tracks.push(...(await audioTracksForRender(env, generation.project_id, request, SLATE_MS)));
 
   try {
     const submitted = await submitAssembly(env, model, tracks);
     const nextRequest = {
       ...request,
       stage: "compose",
-      mergedVideoUrl: merged.url,
-      mergedWidth: 1080,
-      mergedHeight: 1920,
+      slateVideoUrl: slate.url,
+      slateMs: SLATE_MS,
+      outputWidth: 1080,
+      outputHeight: 1920,
+      totalMs: cursor,
     };
     await env.DB.prepare(
       "UPDATE generations SET request_json=?2,status='submitted',provider_request_id=?3,provider_status_url=?4,provider_response_url=?5,submitted_at=?6,updated_at=?6,error_code=NULL,error_detail=NULL WHERE id=?1",
@@ -635,7 +640,7 @@ async function completeMergeStage(env, generation, status) {
   }
 }
 
-async function audioTracksForRender(env, projectId, request) {
+async function audioTracksForRender(env, projectId, request, offsetMs = 0) {
   const tracks = [];
   const push = async (assetId, { startMs = 0, durationMs, role = "audio" }) => {
     const asset = await loadAssetRow(env, projectId, assetId);
@@ -646,7 +651,7 @@ async function audioTracksForRender(env, projectId, request) {
       type: "audio",
       keyframes: [
         {
-          timestamp: Math.max(0, Number(startMs) || 0),
+          timestamp: offsetMs + Math.max(0, Number(startMs) || 0),
           duration,
           url: await signRenderLink(env, { assetId: asset.id, projectId }),
         },
@@ -889,7 +894,15 @@ export async function buildCompositionSpec(env, project, input) {
     }
   }
 
-  return { title, shots: manifest, audioAssetId, audioTracks, totalMs };
+  let slateAssetId = null;
+  if (input.slateAssetId) {
+    const slate = await loadAssetRow(env, project.id, String(input.slateAssetId));
+    if (!slate || slate.kind !== "image")
+      throw new HttpError(400, "The 9:16 slate must be a saved still in this project", "invalid_slate");
+    slateAssetId = slate.id;
+  }
+
+  return { title, shots: manifest, audioAssetId, audioTracks, slateAssetId, totalMs };
 }
 
 export async function createComposition(env, project, input) {
@@ -940,10 +953,16 @@ export async function createRender(env, project, composition, input) {
 
   const spec = safeJson(composition.spec_json, { shots: [], audioAssetId: null, audioTracks: [], totalMs: 0 });
   if (model.render === "social") {
-    // A 9:16 cut keeps the selected order. The merge stage fits every take into
-    // 1080 × 1920 rather than sorting portrait shots to the front.
+    // The selected order is preserved. A deliberate 1080 × 1920 slate opens the
+    // cut, and compose fits every selected take into that frame after it.
     if ((spec.shots ?? []).length < 2)
       throw new HttpError(400, "A 9:16 cut needs at least two saved takes", "no_shots");
+    if (!spec.slateAssetId)
+      throw new HttpError(
+        400,
+        "A 9:16 cut needs a saved 1080 × 1920 slate. Use the studio's Make 9:16 cut control; it creates one before rendering.",
+        "no_slate",
+      );
   }
 
   const cost = model.costMicro;
@@ -967,9 +986,10 @@ export async function createRender(env, project, composition, input) {
           shots: spec.shots,
           audioAssetId: spec.audioAssetId ?? null,
           audioTracks: spec.audioTracks ?? [],
+          slateAssetId: spec.slateAssetId ?? null,
           totalMs: spec.totalMs,
           variant: model.render,
-          stage: model.render === "social" ? "merge" : "compose",
+          stage: model.render === "social" ? "slate" : "compose",
           renderStep: model.render === "social" ? 2 : 1,
         }),
         cost,
@@ -1033,11 +1053,20 @@ export async function dispatchRender(env, generation) {
     }
 
     if (model.render === "social") {
-      const submitted = await submitMerge(
-        env,
-        keyframes.map((keyframe) => keyframe.url),
-        { width: 1080, height: 1920 },
-      );
+      const slate = await loadAssetRow(env, generation.project_id, request.slateAssetId);
+      if (!slate || slate.kind !== "image")
+        throw new HttpError(409, "The 9:16 slate is no longer in this project", "slate_unavailable");
+      const slateUrl = await signRenderLink(env, {
+        assetId: slate.id,
+        projectId: generation.project_id,
+      });
+      const submitted = await submitAssembly(env, model, [
+        {
+          id: "visual",
+          type: "image",
+          keyframes: [{ timestamp: 0, duration: 1000, url: slateUrl }],
+        },
+      ]);
       await env.DB.prepare(
         "UPDATE generations SET status='submitted',provider_request_id=?2,provider_status_url=?3,provider_response_url=?4,submitted_at=?5,updated_at=?5 WHERE id=?1 AND status='submitting'",
       )

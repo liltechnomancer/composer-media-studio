@@ -18,7 +18,7 @@ const state = {
   filter: "all",
   query: "",
   create: null,
-  compose: { shotIds: [], audioAssetId: null, audioTracks: [], title: "", editingId: null },
+  compose: { shotIds: [], audioAssetId: null, audioTracks: [], slateAssetId: null, title: "", editingId: null },
   busy: false,
   polling: null,
   mask: null,
@@ -577,7 +577,7 @@ function compositionCard(composition) {
         </div>`;
       }).join("")}
     </div>
-    ${social.length ? `<p class="small" style="margin:0">The 9:16 cut keeps the selected shot order and uses the same sound. Its first stage merges the takes into 1080 × 1920; the second adds the mix. It is not a rename or a stretch of the master.</p>` : ""}
+    ${social.length ? `<p class="small" style="margin:0">The 9:16 cut keeps the selected shot order and uses the same sound. It opens with a deterministic 1080 × 1920 slate, then composes the takes in that frame. It is not a rename or a stretch of the master.</p>` : ""}
   </article>`;
 }
 
@@ -1250,6 +1250,7 @@ async function handleAction(action, element) {
         shots: state.compose.shotIds.map((shotId) => ({ assetId: shotId })),
         audioAssetId: state.compose.audioAssetId || null,
         audioTracks: state.compose.audioTracks,
+        slateAssetId: state.compose.slateAssetId || null,
       };
       const editingId = state.compose.editingId;
       if (editingId) {
@@ -1275,7 +1276,7 @@ async function handleAction(action, element) {
       return;
     }
     case "compose-new":
-      state.compose = { shotIds: [], audioAssetId: null, audioTracks: [], title: "", editingId: null };
+      state.compose = { shotIds: [], audioAssetId: null, audioTracks: [], slateAssetId: null, title: "", editingId: null };
       render();
       return;
     case "compose-load": {
@@ -1285,6 +1286,7 @@ async function handleAction(action, element) {
         shotIds: composition.shots.map((shot) => shot.assetId),
         audioAssetId: composition.audioAssetId ?? null,
         audioTracks: composition.audioTracks ?? [],
+        slateAssetId: composition.slateAssetId ?? null,
         title: composition.title,
         editingId: composition.id,
       };
@@ -1302,10 +1304,11 @@ async function handleAction(action, element) {
       const estimateMicro = renderEstimate(variant);
       const ok = await confirmAction(
         variant === "social" ? "Make a 9:16 cut?" : "Render this storyboard?",
-        `${variant === "social" ? `The same ${composition.shots.length} takes in the order you chose, merged into a true 1080 × 1920 frame, then composed with the saved sound.` : `${composition.shots.length} clips, ${(composition.totalMs / 1000).toFixed(1)}s assembled.`} Estimated ${money(estimateMicro)}. The participating files are copied to the render provider for this job only.`,
+        `${variant === "social" ? `A one-second 1080 × 1920 slate, then the same ${composition.shots.length} takes in the order you chose, composed with the saved sound.` : `${composition.shots.length} clips, ${(composition.totalMs / 1000).toFixed(1)}s assembled.`} Estimated ${money(estimateMicro)}. The participating files are copied to the render provider for this job only.`,
         `Render · ${money(estimateMicro)}`,
       );
       if (!ok) return;
+      if (variant === "social") await ensureSlate(composition);
       const result = await api(`/api/projects/${state.projectId}/compositions/${composition.id}/render`, {
         method: "POST",
         body: JSON.stringify({
@@ -1706,6 +1709,62 @@ async function mixSoundtrack() {
   state.compose.audioAssetId = asset.id;
   notify("Mixed bed saved as a new WAV. Rendering will use it; the separate tracks remain.");
   render();
+}
+
+/* ---------- deterministic 9:16 slate ---------- */
+
+async function ensureSlate(composition) {
+  if (composition.slateAssetId) return composition.slateAssetId;
+  const canvas = document.createElement("canvas");
+  canvas.width = 1080;
+  canvas.height = 1920;
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#f4f0e8";
+  context.fillRect(0, 0, 1080, 1920);
+  context.fillStyle = "#fc5b05";
+  context.fillRect(80, 170, 920, 10);
+  context.fillStyle = "#17181b";
+  context.font = '600 92px "Space Grotesk", system-ui, sans-serif';
+  const words = String(composition.title || "A studio cut").split(/\s+/);
+  let line = "";
+  let y = 330;
+  for (const word of words) {
+    const next = `${line} ${word}`.trim();
+    if (context.measureText(next).width > 900 && line) {
+      context.fillText(line, 80, y);
+      y += 110;
+      line = word;
+    } else line = next;
+  }
+  if (line) context.fillText(line, 80, y);
+  context.fillStyle = "#5c616a";
+  context.font = '500 30px ui-monospace, monospace';
+  context.fillText("A 9:16 CUT", 80, 1690);
+  context.fillText("Selected order · contained frame", 80, 1740);
+  context.fillStyle = "#fc5b05";
+  context.fillRect(80, 1800, 180, 10);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  const asset = await uploadBlob(
+    blob,
+    `9:16 slate — ${composition.title}`.slice(0, 100),
+    "Deterministic 1080 × 1920 opening slate. The selected takes follow in their chosen order; the frame is composed, not stretched.",
+  );
+  const result = await api(`/api/projects/${state.projectId}/compositions/${composition.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      title: composition.title,
+      shots: composition.shots.map((shot) => ({ assetId: shot.assetId })),
+      audioAssetId: composition.audioAssetId || null,
+      audioTracks: composition.audioTracks ?? [],
+      slateAssetId: asset.id,
+    }),
+  });
+  state.project.compositions = (state.project.compositions ?? []).map((item) =>
+    item.id === composition.id ? { ...item, ...result.composition } : item,
+  );
+  composition.slateAssetId = asset.id;
+  notify("9:16 slate created and saved to the storyboard.");
+  return asset.id;
 }
 
 /* ---------- audio waveforms ---------- */

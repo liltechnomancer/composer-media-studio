@@ -155,9 +155,11 @@ test("a 9:16 cut keeps the selected order and needs no portrait take", async () 
   const { env, project } = await setup();
   await addAsset(env, project, { id: "asset_clip01", kind: "video", durationMs: 6000 });
   await addAsset(env, project, { id: "asset_clip02", kind: "video", durationMs: 6000 });
+  await addAsset(env, project, { id: "asset_slate1", kind: "image" });
   const composition = await createComposition(env, project, {
     title: "Cut",
     shots: [{ assetId: "asset_clip02" }, { assetId: "asset_clip01" }],
+    slateAssetId: "asset_slate1",
   });
   const row = { id: composition.id, ...composition, spec_json: JSON.stringify(composition) };
   const created = await createRender(env, project, row, {
@@ -167,7 +169,8 @@ test("a 9:16 cut keeps the selected order and needs no portrait take", async () 
   assert.equal(created.created, true);
   const manifest = JSON.parse(created.generation.request_json);
   assert.deepEqual(manifest.shots.map((shot) => shot.assetId), ["asset_clip02", "asset_clip01"]);
-  assert.equal(manifest.stage, "merge");
+  assert.equal(manifest.stage, "slate");
+  assert.equal(manifest.slateAssetId, "asset_slate1");
 
   // The old helper must no longer reorder the edit.
   const { orderShotsForSocial } = await import("../src/lib/providers.mjs");

@@ -226,7 +226,7 @@ export const models = {
     references: 0,
     costMicro: 40_000,
     costBasis:
-      "Two bounded fal requests (merge to 1080×1920, then compose with sound); this flat figure is an estimate, not an invoice.",
+      "Two bounded fal compose requests (a 9:16 slate, then the selected takes and sound); this flat figure is an estimate, not an invoice.",
   },
 };
 
@@ -565,6 +565,18 @@ export async function submitAudio(env, model, settings) {
   return falSubmit(env, model.endpoint, input);
 }
 
+export async function readAudioResult(env, generation) {
+  const response = await fetch(generation.provider_response_url, {
+    headers: { authorization: `Key ${falKey(env)}` },
+  });
+  if (!response.ok)
+    throw new HttpError(502, `Audio provider result read failed (${response.status})`, "provider_error");
+  const payload = await response.json().catch(() => null);
+  const file = payload?.audio ?? payload?.audio_file;
+  if (!file?.url) throw new HttpError(502, "Audio provider returned no audio", "provider_invalid");
+  return { url: file.url, contentType: file.content_type ?? "audio/mpeg" };
+}
+
 /** Submit one masked fill, cutout or upscale request. Signed asset links stand
  * in for provider-readable URLs; the owner session never leaves the studio. */
 export async function submitImageEdit(env, model, settings, references) {
@@ -604,48 +616,16 @@ export async function readImageResult(env, generation) {
   return { url: file.url, contentType: file.content_type ?? "image/png" };
 }
 
-/** Merge the ordered takes into a true 9:16 frame before sound is added. */
-export async function submitMerge(env, urls, { width = 1080, height = 1920 } = {}) {
-  return falSubmit(env, "fal-ai/ffmpeg-api/merge-videos", {
-    video_urls: urls,
-    resolution: { width, height },
-  });
-}
-
-export async function readMergeResult(env, generation) {
-  const response = await fetch(generation.provider_response_url, {
-    headers: { authorization: `Key ${falKey(env)}` },
-  });
-  if (!response.ok)
-    throw new HttpError(502, `Merge result read failed (${response.status})`, "provider_error");
-  const payload = await response.json().catch(() => null);
-  const file = payload?.video;
-  if (!file?.url) throw new HttpError(502, "Merge provider returned no video", "provider_invalid");
-  return { url: file.url, contentType: file.content_type ?? "video/mp4" };
-}
-
-export async function readAudioResult(env, generation) {
-  const response = await fetch(generation.provider_response_url, {
-    headers: { authorization: `Key ${falKey(env)}` },
-  });
-  if (!response.ok)
-    throw new HttpError(502, `Audio provider result read failed (${response.status})`, "provider_error");
-  const payload = await response.json().catch(() => null);
-  const file = payload?.audio ?? payload?.audio_file;
-  if (!file?.url) throw new HttpError(502, "Audio provider returned no audio", "provider_invalid");
-  return { url: file.url, contentType: file.content_type ?? "audio/mpeg" };
+/** Retained for older callers. The portrait-first sort was the incomplete
+ * 4:5 workaround; a true 9:16 cut now opens with a 1080×1920 slate and keeps
+ * the selected shot order. */
+export function orderShotsForSocial(shots) {
+  return [...shots];
 }
 
 /** Assemble ordered shots plus an optional audio bed in one bounded call. */
 export async function submitAssembly(env, model, tracks) {
   return falSubmit(env, model.endpoint, { tracks });
-}
-
-/** Retained for older callers. The portrait-first sort was the incomplete
- * 4:5 workaround; a true 9:16 cut now merges the selected order into a
- * 1080×1920 frame instead of changing the edit. */
-export function orderShotsForSocial(shots) {
-  return [...shots];
 }
 
 export async function readRenderResult(env, generation) {
