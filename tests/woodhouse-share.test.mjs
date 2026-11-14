@@ -4,6 +4,17 @@ import worker from "../src/worker.mjs";
 import { createSession } from "../src/lib/auth.mjs";
 import { sha256Hex } from "../src/lib/util.mjs";
 import { PNG_1x1, setup } from "./harness.mjs";
+import { woodhouseGallery } from "../src/lib/ui.mjs";
+
+test("artwork links retain the current search and page when returning to the catalogue", () => {
+  const asset = { id: "first-print", title: "Print", project: "fighter" };
+  const context = { query: "ring & bell", project: "fighter", after: "earlier-print" };
+  const gallery = woodhouseGallery({ assets: [asset], ...context });
+  assert.match(gallery, /q=ring\+%26\+bell&amp;project=fighter&amp;after=earlier-print&amp;asset=first-print/);
+  const detail = woodhouseGallery({ asset, ...context });
+  assert.match(detail, /href="\/portfolio\?q=ring\+%26\+bell&amp;project=fighter&amp;after=earlier-print#artwork-first-print"/);
+  assert.match(woodhouseGallery({ asset }), /href="\/portfolio#artwork-first-print"/);
+});
 
 test("Share browsing and imports preserve source boundaries and deduplicate concurrent saves", async (t) => {
   const { env, project } = await setup();

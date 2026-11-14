@@ -1123,7 +1123,7 @@ async function handlePublic(request, env, url) {
     let status = 200;
     try {
       const assetId = url.searchParams.get("asset");
-      view = assetId ? { asset: await shareAsset(assetId) } : await sharePage(url.searchParams);
+      view = assetId ? { asset: await shareAsset(assetId), query: url.searchParams.get("q") ?? "", project: url.searchParams.get("project") ?? "", after: url.searchParams.get("after") ?? "" } : await sharePage(url.searchParams);
     } catch (error) {
       status = error instanceof HttpError ? error.status : 503;
       if (status === 503) console.warn("Woodhouse catalogue request failed", error.message);

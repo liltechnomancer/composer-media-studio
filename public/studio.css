@@ -21,6 +21,7 @@
   --accent-soft: #ffe4d3;
   --teal: #1f5c58;
   --danger: #a3321c;
+  --danger-ink: #fff;
   --ok: #246b43;
   --shadow: 0 1px 2px rgb(23 24 27 / 6%), 0 12px 32px rgb(23 24 27 / 8%);
   --display: "Space Grotesk", system-ui, sans-serif;
@@ -44,6 +45,7 @@
   --accent-soft: #3b2b21;
   --teal: #8adeb0;
   --danger: #ff9a86;
+  --danger-ink: #17181b;
   --ok: #8adeb0;
   --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 18px 44px rgb(0 0 0 / 34%);
   --field: #1d1f23;
@@ -118,7 +120,7 @@ main { position: relative; z-index: 1; max-width: var(--max); margin: 0 auto; pa
 .button:active, button:active { transform: translateY(1px); }
 .button.secondary, button.secondary { background: transparent; color: var(--ink); border-color: var(--line); }
 .button.secondary:hover, button.secondary:hover { border-color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); }
-.button.danger, button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.button.danger, button.danger, .button.danger:hover, button.danger:hover { background: var(--danger); border-color: var(--danger); color: var(--danger-ink); }
 .button.quiet, button.quiet { background: transparent; border-color: transparent; color: var(--ink-soft); padding-inline: 0.55rem; }
 button[disabled], .button[disabled] { opacity: 0.5; cursor: not-allowed; transform: none; }
 
@@ -301,6 +303,7 @@ dialog h2 { margin: 0; }
     --ink: #f2f3f5; --ink-soft: #d5d8de; --muted: #afb3bb;
     --line: #464a52; --accent: #fc5b05; --accent-bright: #fc5b05;
     --accent-soft: #3b2b21; --teal: #8adeb0; --danger: #ff9a86; --ok: #8adeb0;
+    --danger-ink: #17181b;
     --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 18px 44px rgb(0 0 0 / 34%);
     --field: #1d1f23;
   }

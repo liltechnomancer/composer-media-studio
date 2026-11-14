@@ -353,15 +353,19 @@ function sharePreview(asset, large = false) {
     : "";
 }
 
-function shareCard(asset) {
-  return `<li><a href="/portfolio?asset=${encodeURIComponent(asset.id)}">
+function shareCard(asset, context) {
+  const detail = new URLSearchParams(context);
+  detail.set("asset", asset.id);
+  return `<li id="artwork-${escapeHtml(asset.id)}"><a href="/portfolio?${escapeHtml(detail)}">
     ${sharePreview(asset)}<span>${escapeHtml(shareProjectName(asset.project))}</span>
     <strong>${escapeHtml(asset.title)}</strong>
   </a></li>`;
 }
 
-function shareDetail(asset) {
-  return `<a href="/portfolio?project=${encodeURIComponent(asset.project)}">← More from ${escapeHtml(shareProjectName(asset.project))}</a>
+function shareDetail(asset, context) {
+  const query = context.toString();
+  const back = `/portfolio${query ? `?${query}` : ""}#artwork-${encodeURIComponent(asset.id)}`;
+  return `<div class="row"><a class="button secondary" href="${escapeHtml(back)}">← Back to artwork</a><a href="/portfolio?project=${encodeURIComponent(asset.project)}">More from ${escapeHtml(shareProjectName(asset.project))}</a></div>
     <div class="share-detail">
       <figure>${sharePreview(asset, true)}</figure>
       <section>
@@ -388,6 +392,8 @@ export function woodhouseGallery({ asset, assets = [], query = "", project = "",
   if (query) filters.set("q", query);
   if (project) filters.set("project", project);
   const firstPage = filters.toString() ? "/portfolio?" + filters : "/portfolio";
+  if (after) filters.set("after", after);
+  const context = new URLSearchParams(filters);
   if (nextAfter) filters.set("after", nextAfter);
   return `${head({
     title: asset ? `${asset.title} — Artwork from Woodhouse Share` : "Artwork from Woodhouse Share — Media Studio",
@@ -405,7 +411,7 @@ export function woodhouseGallery({ asset, assets = [], query = "", project = "",
 </header>
 <main id="main" class="share-portfolio">
 ${error ? `<h1>Share artwork</h1><p role="status">${escapeHtml(error)}</p><p><a href="/portfolio">Browse the catalogue</a> · <a href="${shareOrigin}/share/">Open Woodhouse Share</a></p>`
-  : asset ? shareDetail(asset)
+  : asset ? shareDetail(asset, context)
   : `<section class="share-intro">
       <h1>Artwork from Woodhouse Share</h1>
       <p>Browse public artwork, production captures and alternate editions. Each entry links to its original, credit and source notes.</p>
@@ -419,7 +425,7 @@ ${error ? `<h1>Share artwork</h1><p role="status">${escapeHtml(error)}</p><p><a 
       </select></label>
       <button class="button" type="submit">Search</button>
     </form>
-    ${assets.length ? `<ul class="share-prints">${assets.map(shareCard).join("")}</ul>` : '<p>No artwork matches these filters. Try another project or search.</p>'}
+    ${assets.length ? `<ul class="share-prints">${assets.map((item) => shareCard(item, context)).join("")}</ul>` : '<p>No artwork matches these filters. Try another project or search.</p>'}
     ${after || nextAfter ? `<nav class="row share-pagination" aria-label="Artwork pages">
       ${after ? `<a href="${escapeHtml(firstPage)}">First page</a>` : ""}
       ${nextAfter ? `<a class="button secondary" href="/portfolio?${escapeHtml(filters)}">Next page →</a>` : ""}

@@ -722,7 +722,7 @@ function assetView() {
           : "This file type cannot be imported into Launch Kit or used as a variation reference. Upload a JPEG, PNG or WebP still."
       }${isVideo ? ` <button class="quiet" data-action="choose-still">Choose a still</button>` : ""}</p>`;
   return `
-    <p class="small"><a href="#/p/${esc(state.projectId)}/library">← Back to ${esc(state.project.name)}</a></p>
+    <p><a class="button secondary" href="#/p/${esc(state.projectId)}/library">← Back to library</a></p>
     <div class="viewer">
       <div class="stage">${isVideo ? `<video src="${esc(asset.file)}" controls playsinline preload="metadata"></video>` : isAudio ? `<div class="audio-stage"><canvas width="840" height="200" data-waveform="${esc(asset.file)}" aria-hidden="true"></canvas><audio src="${esc(asset.file)}" controls preload="metadata"></audio></div>` : `<img src="${esc(asset.file)}" alt="${esc(asset.title)}">`}</div>
       <aside class="card stack">
