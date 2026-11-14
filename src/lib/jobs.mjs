@@ -9,6 +9,7 @@
 // - a deleted job or asset is never resurrected by a late completion.
 
 import {
+  classifyProviderFailure,
   downloadMedia,
   downloadVideo,
   estimateCost,
@@ -333,6 +334,34 @@ export async function dispatchGeneration(env, generation) {
   }
 }
 
+/** Record a failure that happened after dispatch. The provider request id and
+ * result URLs stay on the row so a bounded reconcile can still read them, and
+ * the reservation is kept because failures after execution may still be billed.
+ * Only a provider-reported terminal error is `failed`; an unreadable status is
+ * `unknown`, which keeps the reconcile path honest. */
+async function recordProviderFailure(env, generation, error, stage) {
+  const terminal = stage === "execution";
+  const code = error instanceof HttpError ? error.code : "provider_error";
+  const detail = [
+    String(error.message ?? error),
+    error.providerStatus ? `HTTP ${error.providerStatus}` : null,
+    error.errorType ? `type ${error.errorType}` : null,
+    `stage ${stage}`,
+    terminal
+      ? "no output was saved; cost kept for provider reconciliation"
+      : "request kept for reconciliation",
+  ]
+    .filter(Boolean)
+    .join(" · ")
+    .slice(0, 240);
+  await env.DB.prepare(
+    "UPDATE generations SET status=?2,error_code=?3,error_detail=?4,updated_at=?5 WHERE id=?1 AND status IN ('submitting','submitted','running','provider_complete','cancel_requested')",
+  )
+    .bind(generation.id, terminal ? "failed" : "unknown", code, detail, now())
+    .run();
+  return loadGeneration(env, generation.id);
+}
+
 async function failGeneration(env, generation, error, { dispatched = false } = {}) {
   const definitive = error instanceof HttpError && error.definitive === true;
   const status = definitive || !dispatched ? "failed" : "unknown";
@@ -417,7 +446,7 @@ export async function saveGeneration(env, generation, bytes, format) {
         fresh.model === "studio-assembly"
           ? text(request.title ?? "", 100, "Title", { required: false }) || "Assembled cut"
           : fresh.model === "studio-social"
-            ? "1080 × 1920 cut"
+            ? `${size.width ?? 720} × ${size.height ?? 1280} cut`
             : builtinRecipe(request.recipeId)?.title ??
               (getModel(fresh.model)?.edit === "fill"
                 ? "Masked fill"
@@ -535,12 +564,35 @@ export async function advanceGeneration(env, generation) {
   try {
     status = await readVideoStatus(env, fresh);
   } catch (error) {
-    // A transient read failure is not a provider failure. Leave the job intact.
+    // A transient read failure is not a provider failure. A 4xx is a real
+    // rejection: keep the request identity and record what the provider said.
+    if (error instanceof HttpError && error.definitive) {
+      await recordProviderFailure(env, fresh, error, "status");
+      return loadGeneration(env, fresh.id);
+    }
     return fresh;
   }
 
   const providerState = status.status.toUpperCase();
   if (providerState === "COMPLETED") {
+    // fal can end a queue request as COMPLETED and still return the model's own
+    // failure. Treat that as terminal and never fetch a result that cannot exist.
+    if (status.error) {
+      await recordProviderFailure(
+        env,
+        fresh,
+        Object.assign(
+          new HttpError(
+            502,
+            `Provider finished with an error${status.errorType ? ` (${status.errorType})` : ""}: ${status.error}`,
+            classifyProviderFailure(502, { errorType: status.errorType, detail: status.error }),
+          ),
+          { providerStatus: 200, errorType: status.errorType, stage: "execution" },
+        ),
+        "execution",
+      );
+      return loadGeneration(env, fresh.id);
+    }
     const model = getModel(fresh.model);
     const request = safeJson(fresh.request_json, {});
     if (model.render === "social" && request.stage === "slate")
@@ -784,6 +836,11 @@ async function completeJob(env, generation, status) {
           ? await readImageResult(env, providerGeneration)
           : await readRenderResult(env, providerGeneration);
   } catch (error) {
+    if (error instanceof HttpError && error.definitive) {
+      // 4xx from the result endpoint reproduces a model or permission decision.
+      // Stop here instead of polling a result that will never arrive.
+      return recordProviderFailure(env, generation, error, "result");
+    }
     await env.DB.prepare("UPDATE generations SET error_code='result_unavailable',error_detail=?2,updated_at=?3 WHERE id=?1")
       .bind(generation.id, String(error.message).slice(0, 200), now())
       .run();

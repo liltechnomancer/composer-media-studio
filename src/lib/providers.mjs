@@ -417,6 +417,91 @@ function checkFalUrl(value, label) {
   return url.href;
 }
 
+/** Provider text can carry signed URLs and keys. Keep the actionable sentence,
+ * drop the rest, and bound what reaches the job record or a log. */
+export function sanitiseProviderDetail(value, max = 240) {
+  if (value === undefined || value === null) return "";
+  let text;
+  try {
+    text = typeof value === "string" ? value : JSON.stringify(value);
+  } catch {
+    text = String(value);
+  }
+  return text
+    .replace(/https?:\/\/\S+/gi, "[url]")
+    .replace(/\b(authorization|api[_-]?key|key|token|secret)\b\s*[:=]\s*\S+/gi, "$1 [redacted]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+/** A terminal queue state does not prove successful execution. fal reports the
+ * model's own failure in the queue payload or when the result is read, and a
+ * 403 means different things depending on the account and the endpoint. */
+export function classifyProviderFailure(status, { errorType, detail } = {}) {
+  const text = `${errorType ?? ""} ${detail ?? ""}`.toLowerCase();
+  if (/balance|fund|credit|payment|billing|insufficient|exhausted/.test(text))
+    return "provider_funding";
+  if (/permission|forbidden|not allowed|unauthori[sz]ed|access denied|not enabled|scope/.test(text))
+    return "provider_permission";
+  if (status === 401) return "provider_auth";
+  if (status === 402) return "provider_funding";
+  if (status === 403) return "provider_permission";
+  if (status === 429) return "provider_rate_limited";
+  if (status >= 400 && status < 500) return "provider_rejected";
+  return "provider_error";
+}
+
+/** Read a fal error response once and keep its bounded, sanitised detail. */
+export async function readProviderError(response, label) {
+  const body = await response.text().catch(() => "");
+  let payload = null;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    payload = null;
+  }
+  const raw =
+    payload?.detail ??
+    payload?.error?.message ??
+    (typeof payload?.error === "string" ? payload.error : null) ??
+    payload?.message ??
+    body;
+  const detail = sanitiseProviderDetail(raw);
+  const errorType =
+    sanitiseProviderDetail(
+      payload?.error_type ?? payload?.error?.type ?? response.headers.get("x-fal-error-type") ?? "",
+      80,
+    ) || null;
+  return {
+    status: response.status,
+    detail,
+    errorType,
+    code: classifyProviderFailure(response.status, { errorType, detail }),
+    message: `${label} (${response.status})${detail ? `: ${detail}` : ""}`,
+  };
+}
+
+/** Result retrieval can reproduce the model's error. A 4xx is a decision, not
+ * a transient outage, so the caller can stop polling without a second spend. */
+async function readFalResult(env, generation, label) {
+  if (!generation.provider_response_url)
+    throw new HttpError(409, "This job has no provider result to read", "unknown_outcome");
+  const response = await fetch(generation.provider_response_url, {
+    headers: { authorization: `Key ${falKey(env)}` },
+  });
+  if (!response.ok) {
+    const failure = await readProviderError(response, `${label} result read failed`);
+    const error = new HttpError(502, failure.message, failure.code);
+    error.providerStatus = failure.status;
+    error.errorType = failure.errorType;
+    error.definitive = failure.status >= 400 && failure.status < 500;
+    error.stage = "result";
+    throw error;
+  }
+  return response.json().catch(() => null);
+}
+
 export async function submitVideo(env, model, settings, reference) {
   if (!reference) throw new HttpError(400, "Select the still to animate");
   if (reference.bytes.length > 8 * 1024 * 1024)
@@ -444,16 +529,18 @@ export async function submitVideo(env, model, settings, reference) {
     },
     body: JSON.stringify(body),
   });
-  const payload = await response.json().catch(() => null);
+  const payload = response.ok ? await response.json().catch(() => null) : null;
   if (!response.ok) {
-    const detail = payload?.detail ?? payload?.error?.message ?? `fal responded ${response.status}`;
-    const definitive = response.status >= 400 && response.status < 500;
+    const failure = await readProviderError(response, "Video provider refused the request");
     const error = new HttpError(
-      response.status === 403 ? 402 : 502,
-      `Video provider refused the request: ${String(detail).slice(0, 200)}`,
-      response.status === 403 ? "provider_funding" : "provider_error",
+      failure.code === "provider_funding" ? 402 : 502,
+      failure.message,
+      failure.code,
     );
-    error.definitive = definitive;
+    error.definitive = response.status >= 400 && response.status < 500;
+    error.providerStatus = failure.status;
+    error.errorType = failure.errorType;
+    error.stage = "submit";
     throw error;
   }
   if (!payload?.request_id)
@@ -468,14 +555,35 @@ export async function submitVideo(env, model, settings, reference) {
 export async function readVideoStatus(env, generation) {
   if (!generation.provider_status_url)
     throw new HttpError(409, "This job has no provider status to read", "unknown_outcome");
-  const response = await fetch(generation.provider_status_url, {
+  // logs=1 is the documented way to see a runner failure without submitting
+  // anything. Keep only bounded, sanitised lines.
+  const statusUrl = new URL(generation.provider_status_url);
+  statusUrl.searchParams.set("logs", "1");
+  const response = await fetch(statusUrl.href, {
     headers: { authorization: `Key ${falKey(env)}` },
   });
+  if (!response.ok) {
+    const failure = await readProviderError(response, "Provider status read failed");
+    const error = new HttpError(502, failure.message, failure.code);
+    error.providerStatus = failure.status;
+    error.errorType = failure.errorType;
+    error.definitive = failure.status >= 400 && failure.status < 500;
+    error.stage = "status";
+    throw error;
+  }
   const payload = await response.json().catch(() => null);
-  if (!response.ok)
-    throw new HttpError(502, `Video provider status read failed (${response.status})`, "provider_error");
+  const logs = Array.isArray(payload?.logs)
+    ? payload.logs.slice(-5).map((line) => sanitiseProviderDetail(line?.message ?? line, 200))
+    : [];
   return {
     status: String(payload?.status ?? ""),
+    // COMPLETED does not prove the model succeeded. Keep the provider's own
+    // error and type so the caller can stop without a second paid request.
+    error: payload?.error ? sanitiseProviderDetail(payload.error) : null,
+    errorType: payload?.error_type
+      ? sanitiseProviderDetail(payload.error_type, 80)
+      : null,
+    logs,
     responseUrl: payload?.response_url
       ? checkFalUrl(payload.response_url, "result URL")
       : generation.provider_response_url,
@@ -483,12 +591,7 @@ export async function readVideoStatus(env, generation) {
 }
 
 export async function readVideoResult(env, generation) {
-  const response = await fetch(generation.provider_response_url, {
-    headers: { authorization: `Key ${falKey(env)}` },
-  });
-  if (!response.ok)
-    throw new HttpError(502, `Video provider result read failed (${response.status})`, "provider_error");
-  const payload = await response.json().catch(() => null);
+  const payload = await readFalResult(env, generation, "Video provider");
   const file = payload?.video;
   if (!file?.url) throw new HttpError(502, "Video provider returned no video", "provider_invalid");
   return { url: file.url, contentType: file.content_type ?? "video/mp4", bytes: file.file_size ?? null };
@@ -518,16 +621,18 @@ async function falSubmit(env, endpoint, input) {
     },
     body: JSON.stringify(input),
   });
-  const payload = await response.json().catch(() => null);
+  const payload = response.ok ? await response.json().catch(() => null) : null;
   if (!response.ok) {
-    const detail = payload?.detail ?? payload?.error?.message ?? `fal responded ${response.status}`;
-    const definitive = response.status >= 400 && response.status < 500;
+    const failure = await readProviderError(response, "Provider refused the request");
     const error = new HttpError(
-      response.status === 403 ? 402 : 502,
-      `Provider refused the request: ${String(detail).slice(0, 200)}`,
-      response.status === 403 ? "provider_funding" : "provider_error",
+      failure.code === "provider_funding" ? 402 : 502,
+      failure.message,
+      failure.code,
     );
-    error.definitive = definitive;
+    error.definitive = response.status >= 400 && response.status < 500;
+    error.providerStatus = failure.status;
+    error.errorType = failure.errorType;
+    error.stage = "submit";
     throw error;
   }
   if (!payload?.request_id)
@@ -566,12 +671,7 @@ export async function submitAudio(env, model, settings) {
 }
 
 export async function readAudioResult(env, generation) {
-  const response = await fetch(generation.provider_response_url, {
-    headers: { authorization: `Key ${falKey(env)}` },
-  });
-  if (!response.ok)
-    throw new HttpError(502, `Audio provider result read failed (${response.status})`, "provider_error");
-  const payload = await response.json().catch(() => null);
+  const payload = await readFalResult(env, generation, "Audio provider");
   const file = payload?.audio ?? payload?.audio_file;
   if (!file?.url) throw new HttpError(502, "Audio provider returned no audio", "provider_invalid");
   return { url: file.url, contentType: file.content_type ?? "audio/mpeg" };
@@ -607,18 +707,7 @@ export async function submitImageEdit(env, model, settings, references) {
 }
 
 export async function readImageResult(env, generation) {
-  const response = await fetch(generation.provider_response_url, {
-    headers: { authorization: `Key ${falKey(env)}` },
-  });
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new HttpError(
-      502,
-      `Image edit result read failed (${response.status})${detail ? `: ${detail.slice(0, 240)}` : ""}`,
-      "provider_error",
-    );
-  }
-  const payload = await response.json().catch(() => null);
+  const payload = await readFalResult(env, generation, "Image edit provider");
   const file = payload?.images?.[0] ?? payload?.image ?? payload?.mask_image;
   if (!file?.url) throw new HttpError(502, "Image edit provider returned no image", "provider_invalid");
   return { url: file.url, contentType: file.content_type ?? "image/png" };
@@ -655,18 +744,7 @@ export async function submitAssembly(env, model, tracks) {
 }
 
 export async function readRenderResult(env, generation) {
-  const response = await fetch(generation.provider_response_url, {
-    headers: { authorization: `Key ${falKey(env)}` },
-  });
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new HttpError(
-      502,
-      `Render provider result read failed (${response.status})${detail ? `: ${detail.slice(0, 180)}` : ""}`,
-      "provider_error",
-    );
-  }
-  const payload = await response.json().catch(() => null);
+  const payload = await readFalResult(env, generation, "Render provider");
   const file =
     payload?.video ??
     (typeof payload?.video_url === "string"

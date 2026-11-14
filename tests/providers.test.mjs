@@ -3,7 +3,16 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { submitVideo, readVideoStatus, readVideoResult, downloadVideo, getModel, validateSettings } from "../src/lib/providers.mjs";
+import {
+  classifyProviderFailure,
+  getModel,
+  readVideoStatus,
+  readVideoResult,
+  sanitiseProviderDetail,
+  submitVideo,
+  downloadVideo,
+  validateSettings,
+} from "../src/lib/providers.mjs";
 
 const reference = {
   bytes: Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]),
@@ -97,7 +106,7 @@ test("status and result reads use the stored provider addresses", async () => {
   };
   const { value } = await withFetch(
     (url) =>
-      url.endsWith("/status")
+      url.includes("/status")
         ? new Response(JSON.stringify({ status: "COMPLETED", response_url: generation.provider_response_url }), { status: 200 })
         : new Response(JSON.stringify({ video: { url: "https://v3.fal.media/files/video.mp4", content_type: "video/mp4", file_size: 100 } }), { status: 200 }),
     async () => ({
@@ -111,4 +120,98 @@ test("status and result reads use the stored provider addresses", async () => {
 
 test("video downloads cannot be pointed at an arbitrary host", async () => {
   await assert.rejects(downloadVideo({ FAL_KEY: "k" }, "https://attacker.example/video.mp4"), /untrusted download address/);
+});
+
+test("a 403 with a permission detail is not reported as a funding problem", async () => {
+  await withFetch(
+    () =>
+      new Response(
+        JSON.stringify({ detail: "This API key is not allowed to use this endpoint" }),
+        { status: 403, headers: { "x-fal-error-type": "permission" } },
+      ),
+    async () => {
+      const model = getModel("hailuo-standard");
+      const settings = validateSettings(model, { prompt: "x", durationSeconds: 6 });
+      await assert.rejects(submitVideo({ FAL_KEY: "test-key" }, model, settings, reference), (error) => {
+        assert.equal(error.code, "provider_permission");
+        assert.equal(error.errorType, "permission");
+        assert.equal(error.providerStatus, 403);
+        assert.equal(error.definitive, true);
+        return true;
+      });
+    },
+  );
+});
+
+test("queue status keeps the provider's error, type and recent logs", async () => {
+  const generation = {
+    provider_request_id: "req_123",
+    provider_status_url: "https://queue.fal.run/model/requests/req_123/status",
+    provider_response_url: "https://queue.fal.run/model/requests/req_123",
+  };
+  const { value, calls } = await withFetch(
+    () =>
+      new Response(
+        JSON.stringify({
+          status: "COMPLETED",
+          error: "Input video is not readable; see https://signed.example/secret",
+          error_type: "validation",
+          logs: [
+            { message: "queued" },
+            { message: "runner failed: invalid input" },
+          ],
+        }),
+        { status: 200 },
+      ),
+    () => readVideoStatus({ FAL_KEY: "k" }, generation),
+  );
+  assert.match(calls[0].url, /\?logs=1$/);
+  assert.equal(value.status, "COMPLETED");
+  assert.equal(value.errorType, "validation");
+  assert.match(value.error, /not readable/);
+  assert.ok(!value.error.includes("signed.example"));
+  assert.deepEqual(value.logs, ["queued", "runner failed: invalid input"]);
+});
+
+test("a result read failure keeps its HTTP status and provider error type", async () => {
+  const generation = {
+    provider_response_url: "https://queue.fal.run/model/requests/req_123",
+  };
+  await withFetch(
+    () =>
+      new Response(JSON.stringify({ detail: "Result not permitted for this key" }), {
+        status: 403,
+        headers: { "x-fal-error-type": "permission" },
+      }),
+    async () => {
+      await assert.rejects(readVideoResult({ FAL_KEY: "k" }, generation), (error) => {
+        assert.equal(error.code, "provider_permission");
+        assert.equal(error.providerStatus, 403);
+        assert.equal(error.errorType, "permission");
+        assert.equal(error.definitive, true);
+        assert.equal(error.stage, "result");
+        return true;
+      });
+    },
+  );
+});
+
+test("provider detail is bounded and strips signed URLs and keys", () => {
+  const detail = sanitiseProviderDetail(
+    "key: sk_live_secret failed at https://queue.fal.run/x?sig=abc and again https://v3.fal.media/y",
+    120,
+  );
+  assert.ok(!detail.includes("sk_live_secret"));
+  assert.ok(!detail.includes("queue.fal.run"));
+  assert.ok(!detail.includes("fal.media"));
+  assert.ok(detail.length <= 120);
+});
+
+test("failure classification separates funding, permission and transient errors", () => {
+  assert.equal(classifyProviderFailure(403, { detail: "Exhausted balance" }), "provider_funding");
+  assert.equal(classifyProviderFailure(403, { detail: "Forbidden" }), "provider_permission");
+  assert.equal(classifyProviderFailure(401, {}), "provider_auth");
+  assert.equal(classifyProviderFailure(429, {}), "provider_rate_limited");
+  assert.equal(classifyProviderFailure(422, { detail: "invalid input" }), "provider_rejected");
+  assert.equal(classifyProviderFailure(503, {}), "provider_error");
 });

@@ -366,8 +366,12 @@ function createView() {
   const maskAsset = create.maskAssetId ? state.project.assets.find((asset) => asset.id === create.maskAssetId) : null;
   const promptRequired = model?.promptRequired !== false;
   const fundingBlocked = state.project.generations.some((generation) => generation.error?.code === "provider_funding");
+  const permissionBlocked = state.project.generations.some((generation) => generation.error?.code === "provider_permission" || generation.error?.code === "provider_auth");
+  const executionFailed = state.project.generations.some((generation) => generation.error?.code === "provider_execution");
   return `
     ${fundingBlocked ? `<p class="notice warn">The studio's video provider refused the last request for funding. Image work and the library still work; add credit to the studio's own provider account before starting another clip.</p>` : ""}
+    ${permissionBlocked ? `<p class="notice warn">The provider refused this account access to a request or result. Nothing was regenerated. Fix the studio's provider key or endpoint permission, then use Reconcile on the job; the saved request id is kept.</p>` : ""}
+    ${executionFailed ? `<p class="notice warn">The provider finished the last render with an error. The provider's own message is recorded on the job; a new render is a separate request and is not sent automatically.</p>` : ""}
     <div class="grid two">
       <div class="card">
         <p class="eyebrow">1 · Choose a starting point</p>
@@ -559,7 +563,7 @@ function compositionCard(composition) {
     ${changedSinceRender(composition, renders) ? `<p class="small" style="margin:0"><strong>Changed since the last render.</strong> Render again to include the latest edits; earlier results are kept.</p>` : ""}
     <div class="row">
       <button class="button secondary" data-action="compose-render" data-variant="assembly" data-id="${esc(composition.id)}" ${pending ? "disabled" : ""}>Render master · ${money(renderEstimate("assembly"))}</button>
-      <button class="button secondary" data-action="compose-render" data-variant="social" data-id="${esc(composition.id)}" ${pending ? "disabled" : ""} title="The selected order, merged into a true 1080 × 1920 frame, then composed with the saved sound">Make 9:16 cut · ${money(renderEstimate("social"))}</button>
+      <button class="button secondary" data-action="compose-render" data-variant="social" data-id="${esc(composition.id)}" ${pending ? "disabled" : ""} title="The selected order, composed into a 720 × 1280 (9:16) master with the saved sound, after a one-second vertical slate">Make 9:16 cut · ${money(renderEstimate("social"))}</button>
       <button class="quiet" data-action="compose-load" data-id="${esc(composition.id)}">Edit shots</button>
     </div>
     <div class="render-list">
@@ -577,7 +581,7 @@ function compositionCard(composition) {
         </div>`;
       }).join("")}
     </div>
-    ${social.length ? `<p class="small" style="margin:0">The 9:16 cut keeps the selected shot order and uses the same sound. It opens with a deterministic 1080 × 1920 slate, then composes the takes in that frame. It is not a rename or a stretch of the master.</p>` : ""}
+    ${social.length ? `<p class="small" style="margin:0">The 9:16 cut keeps the selected shot order and uses the same sound. It opens with a deterministic 1080 × 1920 slate, then composes the takes into a 720 × 1280 master. It is not a rename or a stretch of the 16:9 cut.</p>` : ""}
   </article>`;
 }
 
@@ -1304,7 +1308,7 @@ async function handleAction(action, element) {
       const estimateMicro = renderEstimate(variant);
       const ok = await confirmAction(
         variant === "social" ? "Make a 9:16 cut?" : "Render this storyboard?",
-        `${variant === "social" ? `A one-second 1080 × 1920 slate, then the same ${composition.shots.length} takes in the order you chose, composed with the saved sound.` : `${composition.shots.length} clips, ${(composition.totalMs / 1000).toFixed(1)}s assembled.`} Estimated ${money(estimateMicro)}. The participating files are copied to the render provider for this job only.`,
+        `${variant === "social" ? `A one-second 1080 × 1920 slate, then the same ${composition.shots.length} takes in the order you chose, composed into a 720 × 1280 master with the saved sound.` : `${composition.shots.length} clips, ${(composition.totalMs / 1000).toFixed(1)}s assembled.`} Estimated ${money(estimateMicro)}. The participating files are copied to the render provider for this job only.`,
         `Render · ${money(estimateMicro)}`,
       );
       if (!ok) return;
@@ -1747,7 +1751,7 @@ async function ensureSlate(composition) {
   const asset = await uploadBlob(
     blob,
     `9:16 slate — ${composition.title}`.slice(0, 100),
-    "Deterministic 1080 × 1920 opening slate. The selected takes follow in their chosen order; the frame is composed, not stretched.",
+    "Deterministic 1080 × 1920 opening slate. The selected takes follow in their chosen order; the master is composed at 720 × 1280, not stretched.",
   );
   const result = await api(`/api/projects/${state.projectId}/compositions/${composition.id}`, {
     method: "PATCH",
