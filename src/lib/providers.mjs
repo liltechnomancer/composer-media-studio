@@ -9,9 +9,6 @@ import { HttpError } from "./util.mjs";
 export const PROVIDER_CLOUDFLARE = "cloudflare-workers-ai";
 export const PROVIDER_FAL = "fal";
 export const FAL_ORIGIN = "https://queue.fal.run";
-// Direct inference returns the model result in the same response (no queue
-// result route). Used for bounded renders only.
-export const FAL_DIRECT_ORIGIN = "https://fal.run";
 
 const imageDimensions = {
   square: { width: 1024, height: 1024 },
@@ -744,49 +741,6 @@ export async function readSlateResult(env, generation) {
 /** Assemble ordered shots plus an optional audio bed in one bounded call. */
 export async function submitAssembly(env, model, tracks) {
   return falSubmit(env, model.endpoint, { tracks });
-}
-
-/** Direct, non-queue render call. fal documents both the direct and queue
- * methods for the same model. This studio's current key is accepted for the
- * compose request and refused on the queue result route, so a bounded render
- * reads its result from the direct response instead of a second paid job.
- * The call is deliberately capped; an overrun is reported as unknown. */
-export async function runRenderDirect(env, model, tracks) {
-  const response = await fetch(`${FAL_DIRECT_ORIGIN}/${model.endpoint}`, {
-    method: "POST",
-    headers: {
-      authorization: `Key ${falKey(env)}`,
-      "content-type": "application/json",
-      "x-fal-request-timeout": String(model.directTimeoutSeconds ?? 25),
-    },
-    body: JSON.stringify({ tracks }),
-  });
-  if (!response.ok) {
-    const failure = await readProviderError(response, "Render provider refused the request");
-    const error = new HttpError(
-      failure.code === "provider_funding" ? 402 : 502,
-      failure.message,
-      failure.code,
-    );
-    error.definitive = response.status >= 400 && response.status < 500;
-    error.providerStatus = failure.status;
-    error.errorType = failure.errorType;
-    error.stage = "render";
-    throw error;
-  }
-  const payload = await response.json().catch(() => null);
-  const file =
-    payload?.video ??
-    (typeof payload?.video_url === "string"
-      ? { url: payload.video_url, content_type: "video/mp4" }
-      : null);
-  if (!file?.url) throw new HttpError(502, "Render provider returned no video", "provider_invalid");
-  return {
-    url: file.url,
-    contentType: file.content_type ?? "video/mp4",
-    thumbnailUrl: typeof payload?.thumbnail_url === "string" ? payload.thumbnail_url : null,
-    requestId: response.headers.get("x-fal-request-id") ?? payload?.request_id ?? null,
-  };
 }
 
 export async function readRenderResult(env, generation) {
