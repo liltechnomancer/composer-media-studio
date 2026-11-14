@@ -100,6 +100,34 @@ async function body(request, limit = 64 * 1024) {
   }
 }
 
+function rangeHeaders(range, size) {
+  return {
+    "accept-ranges": "bytes",
+    "content-length": String(range ? range.length : size),
+    ...(range ? { "content-range": `bytes ${range.start}-${range.end}/${size}` } : {}),
+  };
+}
+
+/** Parse one byte range. Range playback is a real media feature, not a label. */
+function parseRange(header, size) {
+  if (!header) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(String(header).trim());
+  if (!match) return { invalid: true };
+  let start = match[1] ? Number(match[1]) : null;
+  let end = match[2] ? Number(match[2]) : null;
+  if (start === null && end === null) return { invalid: true };
+  if (start === null) {
+    start = Math.max(0, size - end);
+    end = size - 1;
+  } else if (end === null) {
+    end = size - 1;
+  }
+  end = Math.min(end, size - 1);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start > end)
+    return { invalid: true };
+  return { offset: start, length: end - start + 1, start, end };
+}
+
 function assetView(asset, extra = {}) {
   return {
     id: asset.id,
@@ -608,12 +636,22 @@ async function handleApi(request, env, url) {
 
     if (action === "file" && (method === "GET" || method === "HEAD")) {
       if (asset.deleted_at) throw new HttpError(410, "This asset was deleted", "deleted");
-      const object = await env.MEDIA.get(asset.r2_key);
+      const range = parseRange(request.headers.get("range"), asset.bytes);
+      if (range?.invalid)
+        return new Response(null, {
+          status: 416,
+          headers: { "content-range": `bytes */${asset.bytes}`, "accept-ranges": "bytes" },
+        });
+      const object = await env.MEDIA.get(
+        asset.r2_key,
+        range ? { range: { offset: range.offset, length: range.length } } : undefined,
+      );
       if (!object) throw new HttpError(410, "The stored bytes are unavailable", "unavailable");
       return new Response(method === "HEAD" ? null : object.body, {
+        status: range ? 206 : 200,
         headers: {
           "content-type": asset.mime,
-          "content-length": String(asset.bytes),
+          ...rangeHeaders(range, asset.bytes),
           "cache-control": "private, max-age=300",
           etag: `"${asset.sha256.slice(0, 32)}"`,
         },
@@ -622,12 +660,22 @@ async function handleApi(request, env, url) {
 
     if (action === "download" && method === "GET") {
       if (asset.deleted_at) throw new HttpError(410, "This asset was deleted", "deleted");
-      const object = await env.MEDIA.get(asset.r2_key);
+      const range = parseRange(request.headers.get("range"), asset.bytes);
+      if (range?.invalid)
+        return new Response(null, {
+          status: 416,
+          headers: { "content-range": `bytes */${asset.bytes}`, "accept-ranges": "bytes" },
+        });
+      const object = await env.MEDIA.get(
+        asset.r2_key,
+        range ? { range: { offset: range.offset, length: range.length } } : undefined,
+      );
       if (!object) throw new HttpError(410, "The stored bytes are unavailable", "unavailable");
       return new Response(object.body, {
+        status: range ? 206 : 200,
         headers: {
           "content-type": asset.mime,
-          "content-length": String(asset.bytes),
+          ...rangeHeaders(range, asset.bytes),
           "content-disposition": `attachment; filename="media-${asset.id}.${extensionFor(asset.mime)}"`,
           "cache-control": "private, no-store",
         },
@@ -864,12 +912,22 @@ async function handlePublic(request, env, url) {
       .bind(assetId, projectId)
       .first();
     if (!asset) throw new HttpError(404, "Not found", "not_found");
-    const object = await env.MEDIA.get(asset.r2_key);
+    const range = parseRange(request.headers.get("range"), asset.bytes);
+    if (range?.invalid)
+      return new Response(null, {
+        status: 416,
+        headers: { "content-range": `bytes */${asset.bytes}`, "accept-ranges": "bytes" },
+      });
+    const object = await env.MEDIA.get(
+      asset.r2_key,
+      range ? { range: { offset: range.offset, length: range.length } } : undefined,
+    );
     if (!object) throw new HttpError(410, "The stored bytes are unavailable", "unavailable");
     return new Response(request.method === "HEAD" ? null : object.body, {
+      status: range ? 206 : 200,
       headers: {
         "content-type": asset.mime,
-        "content-length": String(asset.bytes),
+        ...rangeHeaders(range, asset.bytes),
         "cache-control": "no-store",
         "x-content-type-options": "nosniff",
         "content-security-policy": "default-src 'none'; sandbox",
@@ -890,11 +948,11 @@ async function handlePublic(request, env, url) {
     if (!publication || publication.asset_deleted)
       throw new HttpError(404, "This page is not published", "not_found");
 
-    if (extra === "/download") return servePublished(env, publication.asset_id, true);
-    if (extra === "/media") return servePublished(env, publication.asset_id, false);
+    if (extra === "/download") return servePublished(request, env, publication.asset_id, true);
+    if (extra === "/media") return servePublished(request, env, publication.asset_id, false);
     if (extra === "/poster") {
       if (!publication.poster_asset_id) throw new HttpError(404, "No poster for this page", "not_found");
-      return servePublished(env, publication.poster_asset_id, false);
+      return servePublished(request, env, publication.poster_asset_id, false);
     }
     if (request.method !== "GET" && request.method !== "HEAD")
       throw new HttpError(405, "Method not allowed", "method_not_allowed");
@@ -948,7 +1006,7 @@ async function handlePublic(request, env, url) {
       .bind(shareMatch[1])
       .first();
     if (!publication) throw new HttpError(404, "Not found", "not_found");
-    return servePublished(env, publication.asset_id, false);
+    return servePublished(request, env, publication.asset_id, false);
   }
 
   if (path === "/healthz") {
@@ -1019,14 +1077,23 @@ async function handlePublic(request, env, url) {
   });
 }
 
-async function servePublished(env, assetId, download) {
+async function servePublished(request, env, assetId, download) {
   const asset = await env.DB.prepare("SELECT * FROM assets WHERE id=?1").bind(assetId).first();
   if (!asset || asset.deleted_at) throw new HttpError(404, "Not found", "not_found");
-  const object = await env.MEDIA.get(asset.r2_key);
+  const range = parseRange(request.headers.get("range"), asset.bytes);
+  if (range?.invalid)
+    return new Response(null, {
+      status: 416,
+      headers: { "content-range": `bytes */${asset.bytes}`, "accept-ranges": "bytes" },
+    });
+  const object = await env.MEDIA.get(
+    asset.r2_key,
+    range ? { range: { offset: range.offset, length: range.length } } : undefined,
+  );
   if (!object) throw new HttpError(410, "This media is no longer available", "unavailable");
   const headers = {
     "content-type": asset.mime,
-    "content-length": String(asset.bytes),
+    ...rangeHeaders(range, asset.bytes),
     // A withdrawn publication must stop resolving quickly, so public media is
     // only briefly cacheable rather than cached for a day.
     "cache-control": "public, max-age=60",
@@ -1037,7 +1104,10 @@ async function servePublished(env, assetId, download) {
   };
   if (download)
     headers["content-disposition"] = `attachment; filename="published-${asset.id}.${extensionFor(asset.mime)}"`;
-  return new Response(object.body, { headers });
+  return new Response(request.method === "HEAD" ? null : object.body, {
+    status: range ? 206 : 200,
+    headers,
+  });
 }
 
 export default {
