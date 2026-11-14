@@ -49,6 +49,7 @@
     "PUBLIC_BUILD_URL": "https://composer.loftwah.com/init?start=media-studio",
     "PUBLIC_STORY_URL": "https://composer.loftwah.com/media-studio",
     "WOODHOUSE_SHARE": "true",
+    "PUBLIC_SHOWCASE_SLUGS": "Na9FNUB_VhzZ7zA9,jWri1dDSfWbZ8HXD",
     "LAUNCH_KIT_URL": "https://composer-launch-kit.loftwah.workers.dev/"
   },
   "triggers": {

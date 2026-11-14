@@ -3,7 +3,7 @@ import { test } from "node:test";
 import worker from "../src/worker.mjs";
 import { createSession } from "../src/lib/auth.mjs";
 import { sha256Hex } from "../src/lib/util.mjs";
-import { PNG_1x1, setup } from "./harness.mjs";
+import { PNG_1x1, setup, addAsset } from "./harness.mjs";
 import { woodhouseGallery } from "../src/lib/ui.mjs";
 
 test("artwork links retain the current search and page when returning to the catalogue", () => {
@@ -14,6 +14,22 @@ test("artwork links retain the current search and page when returning to the cat
   const detail = woodhouseGallery({ asset, ...context });
   assert.match(detail, /href="\/portfolio\?q=ring\+%26\+bell&amp;project=fighter&amp;after=earlier-print#artwork-first-print"/);
   assert.match(woodhouseGallery({ asset }), /href="\/portfolio#artwork-first-print"/);
+});
+
+test("showcase lists only currently published live videos and honours withdrawal", async (t) => {
+  const { env, project } = await setup();
+  env.WOODHOUSE_SHARE = "true";
+  env.PUBLIC_SHOWCASE_SLUGS = "example-film";
+  const asset = await addAsset(env, project, { id: "asset_film", kind: "video" });
+  await env.DB.prepare("INSERT INTO publications(id,project_id,asset_id,slug,title,description,asset_revision,created_at) VALUES(?1,?2,?3,?4,?5,?6,1,1)")
+    .bind("pub_film", project.id, asset.id, "example-film", "A real film", "A saved clip.").run();
+  t.mock.method(globalThis, "fetch", async () => Response.json({ version: 1, assets: [], nextAfter: null }));
+  const read = () => worker.fetch(new Request("https://studio.test/portfolio"), env);
+  const visible = await read();
+  assert.equal(visible.headers.get("cache-control"), "no-store");
+  assert.match(await visible.text(), /\/p\/example-film\/media/);
+  await env.DB.prepare("UPDATE publications SET revoked_at=1 WHERE id=?1").bind("pub_film").run();
+  assert.doesNotMatch(await (await read()).text(), /example-film/);
 });
 
 test("Share browsing and imports preserve source boundaries and deduplicate concurrent saves", async (t) => {

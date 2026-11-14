@@ -398,7 +398,7 @@ function shareDetail(asset, context) {
     </div>`;
 }
 
-export function woodhouseGallery({ asset, assets = [], query = "", project = "", after, nextAfter, error }) {
+export function woodhouseGallery({ asset, assets = [], query = "", project = "", after, nextAfter, error, films = [] }) {
   const filters = new URLSearchParams();
   if (query) filters.set("q", query);
   if (project) filters.set("project", project);
@@ -428,6 +428,7 @@ ${error ? `<h1>Share artwork</h1><p role="status">${escapeHtml(error)}</p><p><a 
       <p>Browse public artwork, production captures and alternate editions. Each entry links to its original, credit and source notes.</p>
       <a href="${shareOrigin}/share/">Open Woodhouse Share ↗</a>
     </section>
+    ${films.length ? `<section class="share-films" aria-labelledby="share-films-title"><h2 id="share-films-title">Made in Media Studio</h2><p>Watch published work and follow each piece to its source and details.</p><div class="share-film-grid">${films.map((film) => `<figure><video controls playsinline preload="none"${film.poster_asset_id ? ` poster="/p/${encodeURIComponent(film.slug)}/poster"` : ""} aria-label="${escapeHtml(film.title)}"><source src="/p/${encodeURIComponent(film.slug)}/media" type="${escapeHtml(film.mime)}"><a href="/p/${encodeURIComponent(film.slug)}">Open ${escapeHtml(film.title)}</a></video><figcaption><strong>${escapeHtml(film.title)}</strong><p>${escapeHtml(film.description || "")}</p><a href="/p/${encodeURIComponent(film.slug)}">Open the published piece</a></figcaption></figure>`).join("")}</div></section>` : ""}
     <form class="share-filters" action="/portfolio" method="get" role="search">
       <label>Search artwork <input name="q" type="search" maxlength="100" value="${escapeHtml(query)}"></label>
       <label>Project <select name="project">

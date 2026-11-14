@@ -313,6 +313,14 @@ dialog h2 { margin: 0; }
 .share-portfolio { width: min(var(--max), 100%); margin-inline: auto; padding: clamp(1rem, 4vw, 3rem); }
 .share-intro { max-width: 48rem; padding-block: 1rem 1.75rem; }
 .share-intro p { max-width: 58ch; color: var(--ink-soft); }
+.share-films { border-block: 1px solid var(--line); padding: 1.5rem 0 2rem; margin-bottom: 2rem; }
+.share-films > p { color: var(--ink-soft); }
+.share-film-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5rem; }
+.share-film-grid figure { margin: 0; min-width: 0; }
+.share-film-grid video { display: block; width: 100%; height: clamp(240px, 34vw, 460px); object-fit: contain; background: #111; }
+.share-film-grid figcaption { padding-top: .75rem; }
+.share-film-grid figcaption p { color: var(--ink-soft); margin: .4rem 0; }
+@media (max-width: 720px) { .share-film-grid { grid-template-columns: 1fr; } }
 .share-filters { display: flex; align-items: end; gap: .75rem; flex-wrap: wrap; margin-bottom: 2rem; }
 .share-filters label { display: grid; gap: .3rem; }
 .share-filters label:first-child { flex: 1 1 15rem; }

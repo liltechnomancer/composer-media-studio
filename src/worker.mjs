@@ -1127,6 +1127,13 @@ async function handlePublic(request, env, url) {
     try {
       const assetId = url.searchParams.get("asset");
       view = assetId ? { asset: await shareAsset(assetId), query: url.searchParams.get("q") ?? "", project: url.searchParams.get("project") ?? "", after: url.searchParams.get("after") ?? "" } : await sharePage(url.searchParams);
+      if (!assetId && !url.searchParams.get("q") && !url.searchParams.get("project") && !url.searchParams.get("after")) {
+        const slugs = String(env.PUBLIC_SHOWCASE_SLUGS ?? "").split(",").map((value) => value.trim()).filter((value) => /^[A-Za-z0-9_-]{1,80}$/.test(value)).slice(0, 4);
+        const films = await Promise.all(slugs.map((value) => env.DB.prepare(`SELECT p.slug,p.title,p.description,p.poster_asset_id,a.mime,a.width,a.height
+          FROM publications p JOIN assets a ON a.id=p.asset_id
+          WHERE p.slug=?1 AND p.revoked_at IS NULL AND a.deleted_at IS NULL AND a.kind='video'`).bind(value).first()));
+        view.films = films.filter(Boolean);
+      }
     } catch (error) {
       status = error instanceof HttpError ? error.status : 503;
       if (status === 503) console.warn("Woodhouse catalogue request failed", error.message);
@@ -1134,7 +1141,7 @@ async function handlePublic(request, env, url) {
     }
     return new Response(woodhouseGallery(view), {
       status,
-      headers: { "content-type": "text/html; charset=utf-8", "cache-control": status === 200 ? "public, max-age=60" : "no-store" },
+      headers: { "content-type": "text/html; charset=utf-8", "cache-control": status === 200 && !view.films?.length ? "public, max-age=60" : "no-store" },
     });
   }
   if (path === "/help") {
