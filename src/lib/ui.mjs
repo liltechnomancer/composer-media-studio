@@ -84,7 +84,7 @@ function header({ session, composerOrigin, storyUrl, buildUrl, woodhouseShare, h
   return `<header class="site-header">
   <a class="wordmark" href="#/" aria-label="Media Studio home">${mark}<span>Media Studio</span>${brandByline()}</a>
   <nav class="header-nav" aria-label="Studio">
-    ${bridged && composerOrigin ? `<a class="quiet" href="${escapeHtml(composerOrigin)}/media-studio/studio" title="Return to App Composer and reopen this studio">App Composer</a>` : ""}
+    ${bridged && composerOrigin ? `<a class="quiet" href="${escapeHtml(composerOrigin)}/">App Composer</a>` : ""}
     ${storyUrl ? `<a class="quiet" href="${escapeHtml(storyUrl)}">Read the story</a>` : ""}
     <a href="#/">Projects</a>
     ${woodhouseShare ? '<a href="/portfolio">Share artwork</a>' : ""}

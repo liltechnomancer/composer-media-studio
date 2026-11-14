@@ -126,7 +126,7 @@ async function boot() {
   }
   state.session = session;
   if (!session.actions?.includes("read")) {
-    app.innerHTML = `<div class="card"><h1>This studio is not open to this account.</h1><p>The handoff did not include a current read grant. Ask the workspace owner for access, or read the public story.</p><div class="row">${session.composerOrigin ? `<a class="button" href="${esc(session.composerOrigin)}/media-studio/studio">Return to App Composer</a>` : ""}${session.storyUrl ? `<a class="button secondary" href="${esc(session.storyUrl)}">Read the story</a>` : ""}</div></div>`;
+    app.innerHTML = `<div class="card"><h1>This studio is not open to this account.</h1><p>The handoff did not include a current read grant. Ask the workspace owner for access, or read the public story.</p><div class="row">${session.composerOrigin ? `<a class="button" href="${esc(session.composerOrigin)}/">Return to App Composer</a>` : ""}${session.storyUrl ? `<a class="button secondary" href="${esc(session.storyUrl)}">Read the story</a>` : ""}</div></div>`;
     return;
   }
   const data = await api("/api/state");
