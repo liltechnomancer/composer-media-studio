@@ -234,7 +234,7 @@ async function handleLogin(request, env) {
   });
 }
 
-async function handleApi(request, env, url) {
+async function handleApi(request, env, url, ctx) {
   const path = url.pathname.replace(/\/+$/, "");
   const method = request.method;
 
@@ -498,11 +498,11 @@ async function handleApi(request, env, url) {
       if (!created.created) {
         const generation =
           created.generation.status === "admitted"
-            ? await dispatchRender(env, created.generation)
+            ? await retainDispatch(ctx, dispatchRender(env, created.generation))
             : created.generation;
         return json({ generation: generationView(generation), replayed: true, budget: await budgetSnapshot(env, project.id) });
       }
-      const generation = await dispatchRender(env, created.generation);
+      const generation = await retainDispatch(ctx, dispatchRender(env, created.generation));
       return json(
         {
           generation: generationView(generation),
@@ -519,11 +519,11 @@ async function handleApi(request, env, url) {
       if (!created.created) {
         const generation =
           created.generation.status === "admitted"
-            ? await dispatchGeneration(env, created.generation)
+            ? await retainDispatch(ctx, dispatchGeneration(env, created.generation))
             : created.generation;
         return json({ generation: generationView(generation), replayed: true, budget: await budgetSnapshot(env, project.id) });
       }
-      const generation = await dispatchGeneration(env, created.generation);
+      const generation = await retainDispatch(ctx, dispatchGeneration(env, created.generation));
       return json(
         {
           generation: generationView(generation),
@@ -1206,12 +1206,20 @@ async function servePublished(request, env, assetId, download) {
   });
 }
 
+// Keep the same dispatch promise alive if the browser leaves while awaiting the
+// provider. This is a bounded extension, not a guarantee or a retry: a lost
+// reply still becomes unknown and retains its reservation.
+function retainDispatch(ctx, promise) {
+  if (ctx) ctx.waitUntil(promise);
+  return promise;
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     try {
       const url = new URL(request.url);
       const response = url.pathname.startsWith("/api/")
-        ? await handleApi(request, env, url)
+        ? await handleApi(request, env, url, ctx)
         : await handlePublic(request, env, url);
       return securityHeaders(response, url.pathname.replace(/\/+$/, "") === "/portfolio" && env.WOODHOUSE_SHARE === "true");
     } catch (error) {
