@@ -286,7 +286,7 @@ async function handleApi(request, env, url) {
 
   // Every private route declares the action it needs. A project-scoped bridge
   // session cannot read or change another project, even with a valid cookie.
-  const projectIdFromPath = (path.match(/^\/api\/(?:projects|assets)\/([a-z0-9_]+)/) ?? [])[1] ?? null;
+  const projectIdFromPath = (path.match(/^\/api\/projects\/([a-z0-9_]+)/) ?? [])[1] ?? null;
   let action = method === "GET" || method === "HEAD" ? "read" : "edit";
   if (path === "/api/state" || path === "/api/models") action = "read";
   if (path === "/api/projects" && method === "POST") action = "edit";
@@ -313,8 +313,11 @@ async function handleApi(request, env, url) {
 
   if (path === "/api/state" && method === "GET") {
     const { results } = await env.DB.prepare("SELECT * FROM projects ORDER BY updated_at DESC").all();
+    const visible = session.mode === "bridge" && session.project
+      ? results.filter((project) => project.id === session.project)
+      : results;
     return json({
-      projects: await Promise.all(results.map((project) => projectSummary(env, project))),
+      projects: await Promise.all(visible.map((project) => projectSummary(env, project))),
       models: publicModels(),
       videosConfigured: Boolean(env.FAL_KEY),
       allowanceDefaultMicro: Number(env.MONTHLY_ALLOWANCE_MICRO) || 5_000_000,
@@ -601,6 +604,8 @@ async function handleApi(request, env, url) {
     const [, assetId, action] = assetMatch;
     const asset = await env.DB.prepare("SELECT * FROM assets WHERE id=?1").bind(assetId).first();
     if (!asset) throw new HttpError(404, "Asset not found", "not_found");
+    if (session.mode === "bridge" && session.project && asset.project_id !== session.project)
+      throw new HttpError(403, "This studio session is scoped to another project.", "forbidden");
 
     if (!action && method === "GET") return json({ asset: assetView(asset) });
 
@@ -710,14 +715,18 @@ async function handleApi(request, env, url) {
   if (publicationMatch && method === "PATCH") {
     const input = await body(request);
     if (typeof input.hidden !== "boolean") throw new HttpError(400, "Send hidden: true or false", "invalid");
-    const row = await env.DB.prepare("SELECT id FROM publications WHERE id=?1 AND revoked_at IS NULL").bind(publicationMatch[1]).first();
+    const row = await env.DB.prepare("SELECT id,project_id FROM publications WHERE id=?1 AND revoked_at IS NULL").bind(publicationMatch[1]).first();
     if (!row) throw new HttpError(404, "Publication not found", "not_found");
+    if (session.mode === "bridge" && session.project && row.project_id !== session.project)
+      throw new HttpError(403, "This studio session is scoped to another project.", "forbidden");
     await env.DB.prepare("UPDATE publications SET hidden=?2 WHERE id=?1").bind(row.id, input.hidden ? 1 : 0).run();
     return json({ id: row.id, hidden: input.hidden });
   }
   if (publicationMatch && method === "DELETE") {
-    const row = await env.DB.prepare("SELECT id FROM publications WHERE id=?1").bind(publicationMatch[1]).first();
+    const row = await env.DB.prepare("SELECT id,project_id FROM publications WHERE id=?1").bind(publicationMatch[1]).first();
     if (!row) throw new HttpError(404, "Publication not found", "not_found");
+    if (session.mode === "bridge" && session.project && row.project_id !== session.project)
+      throw new HttpError(403, "This studio session is scoped to another project.", "forbidden");
     await env.DB.prepare("UPDATE publications SET revoked_at=?2 WHERE id=?1 AND revoked_at IS NULL")
       .bind(row.id, now())
       .run();
@@ -728,6 +737,8 @@ async function handleApi(request, env, url) {
   if (generationMatch) {
     const [, generationId, action] = generationMatch;
     let generation = await loadGeneration(env, generationId);
+    if (session.mode === "bridge" && session.project && generation.project_id !== session.project)
+      throw new HttpError(403, "This studio session is scoped to another project.", "forbidden");
     if (method === "GET" && !action) {
       if (["submitted", "running", "provider_complete", "saving", "submitting"].includes(generation.status))
         generation = await advanceGeneration(env, generation);

@@ -178,6 +178,19 @@ test("a current grant with no generate action stops the privileged check", async
       );
     assert.equal(await verifyComposerGrant(runtime, session, "generate"), true);
 
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          actor: "a-different-account",
+          workspace: "ws-personal",
+          actions: ["read", "generate"],
+          revision: 4,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    await assert.rejects(() => verifyComposerGrant(runtime, session, "generate"), /account or workspace changed/);
+
     globalThis.fetch = async () => {
       throw new Error("composer down");
     };
