@@ -97,6 +97,17 @@ test("one atomic admission prevents oversubscribing the allowance", async () => 
   assert.equal(row.status, "failed");
 });
 
+test("H3 video reserves its conservative duration estimate before dispatch", async () => {
+  const { env, project } = await setup({ allowance: 440_000 });
+  await env.MEDIA.put("source", PNG_1x1);
+  await env.DB.prepare("INSERT INTO assets(id,project_id,kind,r2_key,mime,bytes,width,height,sha256,title,source,created_at,updated_at) VALUES('asset_ref',?1,'image','source','image/png',1,1,1,'hash','Still','upload',1,1)").bind(project.id).run();
+  const input = { kind: "video", model: "h3-max-turbo", prompt: "Move the light", durationSeconds: 10, referenceAssetId: "asset_ref", clientRequestId: "request_h3_1" };
+  const first = await createGeneration(env, project, input);
+  assert.equal(first.generation.cost_reserved_micro, 440_000);
+  assert.equal((await budgetSnapshot(env, project.id)).reservedMicro, 440_000);
+  await assert.rejects(createGeneration(env, project, { ...input, clientRequestId: "request_h3_2" }), (error) => error.code === "budget_exhausted");
+});
+
 test("saving retains one owned asset and a retry never generates again", async () => {
   const { env, project } = await setup();
   const { generation } = await createGeneration(env, project, imageRequest());

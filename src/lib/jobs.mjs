@@ -1014,7 +1014,8 @@ export async function pendingGenerations(env, limit = 8) {
 }
 
 export const MAX_SHOTS = 6;
-export const MAX_SHOT_MS = 10_500;
+// H3's documented 15-second output can run roughly 0.7 seconds longer.
+export const MAX_SHOT_MS = 16_000;
 export const MAX_TOTAL_MS = 60_000;
 
 /** Validate an editable composition against the project's own saved clips. */

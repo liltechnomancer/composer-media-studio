@@ -104,6 +104,17 @@ test("a composition only accepts this project's bounded clips", async () => {
   assert.deepEqual(spec.shots.map((shot) => shot.assetId), ["asset_clip02", "asset_clip01", "asset_clip03"]);
 });
 
+test("a 15-second H3 take with its documented overrun remains assemblable, with a hard clip bound", async () => {
+  const { env, project } = await setup();
+  await addAsset(env, project, { id: "asset_h3_long", kind: "video", durationMs: 15_700 });
+  await addAsset(env, project, { id: "asset_short", kind: "video", durationMs: 5_000 });
+  await addAsset(env, project, { id: "asset_too_long", kind: "video", durationMs: 16_001 });
+  const shots = [{ assetId: "asset_h3_long" }, { assetId: "asset_short" }];
+  const result = await buildCompositionSpec(env, project, { title: "H3 cut", shots });
+  assert.equal(result.shots[0].durationMs, 15_700);
+  await assert.rejects(buildCompositionSpec(env, project, { title: "Too long", shots: [{ assetId: "asset_too_long" }, { assetId: "asset_short" }] }), /bounded clip/);
+});
+
 test("an edited composition keeps the manifest its earlier render used", async () => {
   const { env, project } = await setup();
   await addAsset(env, project, { id: "asset_clip01", kind: "video", durationMs: 6000 });

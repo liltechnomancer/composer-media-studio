@@ -211,6 +211,8 @@ function estimate() {
     const seconds = Number(state.create.durationSeconds ?? model.audio.maxSeconds);
     return Math.max(1, Math.round((model.costMicro * seconds) / model.audio.maxSeconds));
   }
+  if (model.kind === "video" && model.durationCostsMicro?.[state.create.durationSeconds] != null)
+    return model.durationCostsMicro[state.create.durationSeconds];
   if (model.kind === "video" && model.costPerSecondMicro)
     return model.costPerSecondMicro * Number(state.create.durationSeconds ?? 6);
   return model.costMicro;

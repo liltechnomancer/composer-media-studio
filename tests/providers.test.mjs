@@ -11,6 +11,8 @@ import {
   sanitiseProviderDetail,
   submitVideo,
   downloadVideo,
+  estimateCost,
+  publicModels,
   validateSettings,
 } from "../src/lib/providers.mjs";
 
@@ -60,6 +62,32 @@ test("video submission sends the documented image-to-video shape", async () => {
   assert.equal(body.duration, "6");
   assert.match(body.image_url, /^data:image\/jpeg;base64,/);
   assert.ok(body.prompt.includes("slow push in"));
+});
+
+test("H3 Max Turbo uses the documented 768p image-to-video schema and reserved standard pricing", async () => {
+  const model = getModel("h3-max-turbo");
+  const advertised = publicModels().find((item) => item.id === model.id);
+  for (const [durationSeconds, expected] of [[5, 240_000], [10, 440_000], [15, 640_000]]) {
+    const settings = validateSettings(model, { prompt: "a gentle pan", durationSeconds });
+    assert.equal(estimateCost(model, settings), expected);
+    assert.equal(advertised.durationCostsMicro[durationSeconds], expected);
+  }
+  assert.throws(() => validateSettings(model, { prompt: "a gentle pan", durationSeconds: 6 }), /second/);
+  assert.throws(() => validateSettings(model, { prompt: "a gentle pan", durationSeconds: 5, aspect: "wide" }), /selected still/);
+  const { calls } = await withFetch(
+    () => Response.json({ request_id: "req_h3", status_url: "https://queue.fal.run/minimax/h3-max-turbo/requests/req_h3/status", response_url: "https://queue.fal.run/minimax/h3-max-turbo/requests/req_h3" }),
+    () => submitVideo({ FAL_KEY: "test-key" }, model, validateSettings(model, { prompt: "a gentle pan", durationSeconds: 10 }), reference),
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://queue.fal.run/minimax/h3-max-turbo/image-to-video");
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(body.duration, 10);
+  assert.equal(body.resolution, "768P");
+  assert.equal(body.prompt_expansion_mode, "disabled");
+  assert.equal(body.enable_safety_checker, true);
+  assert.match(body.image_url, /^data:image\/jpeg;base64,/);
+  assert.equal("prompt_optimizer" in body, false);
+  assert.equal(estimateCost(getModel("hailuo-standard"), { durationSeconds: 10 }), 560_000);
 });
 
 test("an unfunded provider is a definite refusal and is not retried", async () => {

@@ -1,5 +1,6 @@
 // MIT. Provider adapters and the one server-side model catalogue.
-// A model is advertised only after its exact request shape was exercised.
+// Provider request shapes are exercised by mocked contract checks; live
+// availability and completed generation are separately recorded evidence.
 //
 // Image: Cloudflare Workers AI, billed to this app's own Cloudflare account.
 // Video: fal.ai queue REST, billed to this app's own fal key.
@@ -92,7 +93,22 @@ export const models = {
     durations: [6, 10],
     costMicro: 280_000,
     costPerSecondMicro: 46_667,
-    costBasis: "fal.ai published US$0.28 per video at the time of review; not an invoice.",
+    durationCostsMicro: { 6: 280_000, 10: 560_000 },
+    costBasis: "fal.ai lists US$0.28 for six seconds and US$0.56 for ten; checked 14 November 2026. Provider billing may change.",
+  },
+  "h3-max-turbo": {
+    id: "h3-max-turbo",
+    label: "MiniMax H3 Max Turbo · 768p",
+    provider: PROVIDER_FAL,
+    endpoint: "minimax/h3-max-turbo/image-to-video",
+    kind: "video",
+    description: "Animate a selected still into a 5, 10 or 15 second 768p video. Provider availability has not yet been verified in this studio.",
+    aspects: ["from-image"],
+    references: 1,
+    durations: [5, 10, 15],
+    costMicro: 240_000,
+    durationCostsMicro: { 5: 240_000, 10: 440_000, 15: 640_000 },
+    costBasis: "Conservative estimate at fal.ai's standard US$0.04 per generated second at 768p, with one extra second reserved because output can run longer. A temporary promotion may reduce the invoice; provider billing can change. Pricing checked 14 November 2026.",
   },
   "kling-standard": {
     id: "kling-standard",
@@ -259,6 +275,7 @@ export function publicModels() {
         : "fal.ai",
     costMicro: model.costMicro,
     costPerSecondMicro: model.costPerSecondMicro ?? null,
+    durationCostsMicro: model.durationCostsMicro ?? null,
     costBasis: model.costBasis,
   }));
 }
@@ -277,6 +294,8 @@ export function estimateCost(model, settings = {}) {
   if (model.kind !== "video") return model.costMicro;
   const base = model.durations?.[0] ?? 5;
   const seconds = Number(settings.durationSeconds ?? base);
+  if (Object.hasOwn(model.durationCostsMicro ?? {}, seconds))
+    return model.durationCostsMicro[seconds];
   if (seconds === base) return model.costMicro;
   return Math.round((model.costMicro * seconds) / base);
 }
@@ -531,10 +550,14 @@ export async function submitVideo(env, model, settings, reference) {
   const body = {
     prompt: settings.prompt,
     image_url: dataUri,
-    duration: String(settings.durationSeconds),
+    duration: model.id === "h3-max-turbo" ? settings.durationSeconds : String(settings.durationSeconds),
   };
   if (model.id === "kling-standard") {
     body.negative_prompt = "blur, distort, low quality, text artefacts";
+  } else if (model.id === "h3-max-turbo") {
+    body.resolution = "768P";
+    body.prompt_expansion_mode = "disabled";
+    body.enable_safety_checker = true;
   } else {
     body.prompt_optimizer = false;
   }

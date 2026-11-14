@@ -593,6 +593,7 @@ async function handleApi(request, env, url, ctx, scopedAgent = null) {
         })),
         notes: [
           "Secrets, provider keys and session cookies are never included.",
+          "Cost figures reflect Studio estimates and reservations, not verified provider invoice charges; the legacy costObservedMicro field is an allocated estimate.",
           "Media bytes are downloaded separately from each asset's download path while it exists.",
           "An export is not a backup of R2: copy the files you need while the studio still serves them.",
         ],
