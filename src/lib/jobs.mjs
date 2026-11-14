@@ -967,16 +967,6 @@ export async function buildCompositionSpec(env, project, input) {
       });
       if (audioTracks.length !== index + 1) throw new HttpError(400, "Keep audio tracks in order", "invalid_audio");
     }
-    if (audioTracks.some((track) => track.trimStartMs || track.gainDb || track.fadeInMs || track.fadeOutMs || track.startMs) && !audioAssetId) {
-      // The compose endpoint has no per-track in-point, gain or fade fields.
-      // The interface mixes those deterministically in the browser and saves
-      // the result as audioAssetId; a direct API caller must do the same.
-      throw new HttpError(
-        400,
-        "Trim, gain, fades and offsets need a rendered mix. Use the studio's Mix soundtrack control, which saves the mixed WAV first; the separate tracks stay as lineage.",
-        "mix_required",
-      );
-    }
   }
 
   let slateAssetId = null;
@@ -1044,6 +1034,21 @@ export async function createRender(env, project, composition, input) {
   if (existing) return { generation: existing, created: false };
 
   const spec = safeJson(composition.spec_json, { shots: [], audioAssetId: null, audioTracks: [], totalMs: 0 });
+  if (
+    (spec.audioTracks ?? []).some(
+      (track) => track.trimStartMs || track.gainDb || track.fadeInMs || track.fadeOutMs || track.startMs,
+    ) &&
+    !spec.audioAssetId
+  ) {
+    // The compose endpoint has no per-track in-point, gain or fade fields.
+    // The interface mixes those deterministically in the browser and saves
+    // the result as audioAssetId; a direct API caller must do the same.
+    throw new HttpError(
+      400,
+      "Trim, gain, fades and offsets need a rendered mix. Use the studio's Mix soundtrack control, which saves the mixed WAV first; the separate tracks stay as lineage.",
+      "mix_required",
+    );
+  }
   if (model.render === "social") {
     // The selected order is preserved. A deliberate 1080 × 1920 slate opens the
     // cut, and compose fits every selected take into that frame after it.

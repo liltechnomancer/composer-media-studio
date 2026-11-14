@@ -209,13 +209,17 @@ test("trim, gain and fades need a saved mix instead of being silently ignored", 
   await addAsset(env, project, { id: "asset_clip01", kind: "video", durationMs: 6000 });
   await addAsset(env, project, { id: "asset_clip02", kind: "video", durationMs: 6000 });
   await addAsset(env, project, { id: "asset_audio1", kind: "audio", durationMs: 30000 });
+  const draft = await createComposition(env, project, {
+    title: "Mix",
+    shots: [{ assetId: "asset_clip01" }, { assetId: "asset_clip02" }],
+    audioTracks: [
+      { assetId: "asset_audio1", role: "music", gainDb: -4, fadeInMs: 500, trimEndMs: 12000 },
+    ],
+  });
   await assert.rejects(
-    buildCompositionSpec(env, project, {
-      title: "Mix",
-      shots: [{ assetId: "asset_clip01" }, { assetId: "asset_clip02" }],
-      audioTracks: [
-        { assetId: "asset_audio1", role: "music", gainDb: -4, fadeInMs: 500, trimEndMs: 12000 },
-      ],
+    createRender(env, project, { id: draft.id, ...draft, spec_json: JSON.stringify(draft) }, {
+      model: "studio-assembly",
+      clientRequestId: "req_mix000001",
     }),
     /rendered mix/,
   );
