@@ -797,17 +797,30 @@ function ask({ title, copy, fields = [], submit = "Continue" }) {
     form.querySelector('button[value="ok"]').textContent = submit;
     // A previous submission must not turn an Escape or backdrop dismissal into OK.
     confirmDialog.returnValue = "";
+    const isEdited = () => [...form.querySelectorAll("input, textarea")].some((input) => input.value !== input.defaultValue);
     const onBackdrop = (event) => {
       if (event.target !== confirmDialog) return;
       const rect = confirmDialog.getBoundingClientRect();
       if (event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom) return;
       // Do not silently discard anything typed into a form.
-      const edited = [...form.querySelectorAll("input, textarea, select")].some((input) => input.value !== input.defaultValue);
-      if (!edited) confirmDialog.close("cancel");
+      if (!isEdited()) confirmDialog.close("cancel");
+    };
+    const onCancel = (event) => {
+      if (!isEdited()) return;
+      event.preventDefault();
+      let message = form.querySelector("[data-dialog-draft-status]");
+      if (!message) {
+        message = document.createElement("p");
+        message.dataset.dialogDraftStatus = "";
+        message.setAttribute("role", "status");
+        form.querySelector("#confirm-copy").append(message);
+      }
+      message.textContent = "Your edits are still here. Choose Cancel to discard them.";
     };
     const finish = (value) => {
       confirmDialog.removeEventListener("close", onClose);
       confirmDialog.removeEventListener("click", onBackdrop);
+      confirmDialog.removeEventListener("cancel", onCancel);
       resolve(value);
     };
     const onClose = () => {
@@ -820,6 +833,7 @@ function ask({ title, copy, fields = [], submit = "Continue" }) {
     };
     confirmDialog.addEventListener("close", onClose);
     confirmDialog.addEventListener("click", onBackdrop);
+    confirmDialog.addEventListener("cancel", onCancel);
     confirmDialog.showModal();
   });
 }
