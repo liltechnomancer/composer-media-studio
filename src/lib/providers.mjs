@@ -581,13 +581,15 @@ export async function readAudioResult(env, generation) {
  * in for provider-readable URLs; the owner session never leaves the studio. */
 export async function submitImageEdit(env, model, settings, references) {
   const reference = references[0];
-  if (!reference?.url) throw new HttpError(400, "Select a still to edit");
-  const input = { image_url: reference.url, sync_mode: false };
+  if (!reference?.bytes) throw new HttpError(400, "Select a still to edit");
+  const mimeFor = (format) => (format === "png" ? "image/png" : format === "webp" ? "image/webp" : "image/jpeg");
+  const imageUrl = `data:${mimeFor(reference.format)};base64,${toBase64(reference.bytes)}`;
+  const input = { image_url: imageUrl, sync_mode: false };
   if (model.edit === "fill") {
-    if (!reference.maskUrl)
+    if (!reference.maskBytes)
       throw new HttpError(400, "Draw or upload a mask before sending a fill request", "mask_required");
     input.prompt = settings.prompt;
-    input.mask_url = reference.maskUrl;
+    input.mask_url = `data:${mimeFor(reference.maskFormat)};base64,${toBase64(reference.maskBytes)}`;
     input.output_format = "png";
     input.safety_tolerance = "2";
   } else if (model.edit === "cutout") {
@@ -608,8 +610,14 @@ export async function readImageResult(env, generation) {
   const response = await fetch(generation.provider_response_url, {
     headers: { authorization: `Key ${falKey(env)}` },
   });
-  if (!response.ok)
-    throw new HttpError(502, `Image edit result read failed (${response.status})`, "provider_error");
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new HttpError(
+      502,
+      `Image edit result read failed (${response.status})${detail ? `: ${detail.slice(0, 240)}` : ""}`,
+      "provider_error",
+    );
+  }
   const payload = await response.json().catch(() => null);
   const file = payload?.images?.[0] ?? payload?.image ?? payload?.mask_image;
   if (!file?.url) throw new HttpError(502, "Image edit provider returned no image", "provider_invalid");

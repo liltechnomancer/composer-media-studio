@@ -275,18 +275,16 @@ export async function dispatchGeneration(env, generation) {
 
   if (model.kind === "image" && model.edit) {
     try {
-      const referenceUrl = await signRenderLink(env, {
-        assetId: reference.asset.id,
-        projectId: generation.project_id,
-      });
-      const maskUrl = request.maskAssetId
-        ? await signRenderLink(env, {
-            assetId: request.maskAssetId,
-            projectId: generation.project_id,
-          })
+      const maskReference = request.maskAssetId
+        ? await referenceFor(env, generation.project_id, request.maskAssetId)
         : null;
       const submitted = await submitImageEdit(env, model, request, [
-        { url: referenceUrl, maskUrl },
+        {
+          bytes: reference.bytes,
+          format: reference.format,
+          maskBytes: maskReference?.bytes ?? null,
+          maskFormat: maskReference?.format ?? null,
+        },
       ]);
       await env.DB.prepare(
         "UPDATE generations SET status='submitted',provider_request_id=?2,provider_status_url=?3,provider_response_url=?4,submitted_at=?5,updated_at=?5 WHERE id=?1 AND status='submitting'",
