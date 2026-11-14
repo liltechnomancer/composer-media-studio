@@ -1,0 +1,16 @@
+# Agent instructions
+
+<!-- woodhouse-impeccable-required:start -->
+## Required Impeccable design workflow
+
+Meaningful UI/design work MUST use the actual current Impeccable skill without waiting for MP to name it. This includes web/admin/mobile interfaces, game menus/HUDs, typography, interaction, responsive layout, accessibility and visual assets. Backend-only work does not need a design campaign.
+
+1. Resolve the skill actually loaded by this agent/harness, including project/global/plugin precedence. Read its SKILL.md and relevant playbook. A copied name, installed directory, detector pass or another project's receipt is not proof of use. Install/update missing or stale copies through the supported Impeccable installer/plugin route; do not fabricate a replacement skill. Preserve customisations and backups outside skill discovery. Inspect supported hooks and demonstrate they fire; record unsupported hooks or trust approval honestly.
+2. Run the resolved skill launcher's context command once in this project's cwd, targeting the changed surface. Read PRODUCT.md, DESIGN.md, applicable surface briefs and this project's accepted visual references. Reconcile old context with current code and recorded MP intent; do not make MP repeat answers already recorded. Keep each product's identity. If the launcher fails, disclose it, read context directly and continue the upstream fallback without pretending the command ran.
+3. Use the relevant playbook: shape/new-work for new surfaces; critique for design quality; audit for accessibility/responsiveness/implementation; then appropriate polish, adapt, harden, typeset, layout, clarify, optimise or other targeted refinement. Read the upstream craft floor before UI edits. Slash commands are agent workflows, not invented shell subcommands.
+4. Inspect the rendered product and actual interactions at representative phone/desktop sizes. Include meaningful keyboard/focus, contrast, overflow, loading/empty/error and reduced-motion checks. Games additionally need gameplay/HUD/touch/state checks; a DOM detector cannot certify a canvas. Preserve explicit art/safety holds; do not redesign unrelated surfaces or manufacture edits for evidence.
+5. Record the actual skill/version/path and harness, target/source, context and playbooks used, findings, resulting changes or justified no-change, rendered/interaction evidence and remaining limits in the existing project issue/PR/evidence. Reinspect the result. Fresh-session discovery must work without MP mentioning Impeccable.
+6. Deliver code through this repository's authorised main and production path and verify changed live behaviour. Tooling-only integration, installation, discovery, design use, remediation and production verification are SEPARATE states. Never close portfolio coverage from one project's result or describe missing evidence as passed.
+
+Installation/setup diagnostics and the portfolio coverage owner: https://github.com/loftwah/woodhouse-new/issues/160 . Current upstream: https://github.com/pbakaus/impeccable and https://impeccable.style/docs/ . Check published skill, CLI and engine versions separately; pin a supported combination, not whichever number looks highest.
+<!-- woodhouse-impeccable-required:end -->

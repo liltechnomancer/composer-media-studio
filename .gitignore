@@ -8,3 +8,6 @@ output/
 .dev.vars
 *.log
 .DS_Store
+
+# Project-local installed design tooling (not application source).
+.agents/skills/impeccable/
