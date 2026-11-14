@@ -4,11 +4,14 @@ import assert from "node:assert/strict";
 
 import {
   allowedActions,
+  claimHandoff,
   createSession,
   readBridgeToken,
   readSession,
   requireSession,
+  verifyComposerGrant,
 } from "../src/lib/auth.mjs";
+import { setup } from "./harness.mjs";
 
 const env = {
   SESSION_SECRET: "test-session-secret-that-is-long-enough",
@@ -110,4 +113,76 @@ test("an owner session keeps the full action set", async () => {
   const session = await readSession(env, requestWith(token));
   assert.equal(session.mode, "owner");
   assert.deepEqual(allowedActions(session), ["read", "edit", "generate", "publish", "admin"]);
+});
+
+test("a handoff can only be consumed once", async () => {
+  const { env: base } = await setup();
+  const runtime = {
+    ...base,
+    BRIDGE_SECRET: "test-bridge-secret-that-is-also-long-enough",
+    COMPOSER_ORIGIN: "https://composer.test",
+  };
+  const token = await bridge({
+    aud: "media-studio",
+    sub: "acct-123",
+    workspace: "ws-personal",
+    actions: ["read"],
+    jti: "handoff-one",
+    exp: Date.now() + 60_000,
+  });
+  const claim = await readBridgeToken(runtime, token);
+  assert.equal(await claimHandoff(runtime, claim), true);
+  assert.equal(await claimHandoff(runtime, claim), false);
+});
+
+test("a current grant with no generate action stops the privileged check", async () => {
+  const { env: base } = await setup();
+  const runtime = {
+    ...base,
+    BRIDGE_SECRET: "test-bridge-secret-that-is-also-long-enough",
+    COMPOSER_ORIGIN: "https://composer.test",
+  };
+  const session = {
+    mode: "bridge",
+    actor: "acct-123",
+    workspace: "ws-personal",
+    project: null,
+    actions: ["read", "generate"],
+    revision: 2,
+  };
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          actor: "acct-123",
+          workspace: "ws-personal",
+          actions: ["read"],
+          revision: 3,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    await assert.rejects(() => verifyComposerGrant(runtime, session, "generate"), /no longer includes generate/);
+
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          actor: "acct-123",
+          workspace: "ws-personal",
+          actions: ["read", "generate"],
+          revision: 3,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    assert.equal(await verifyComposerGrant(runtime, session, "generate"), true);
+
+    globalThis.fetch = async () => {
+      throw new Error("composer down");
+    };
+    await assert.rejects(() => verifyComposerGrant(runtime, session, "generate"), /could not confirm/);
+  } finally {
+    globalThis.fetch = original;
+  }
 });

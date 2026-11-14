@@ -3,6 +3,7 @@
 import {
   allowedActions,
   checkLoginRate,
+  claimHandoff,
   clearCookie,
   createSession,
   readBridgeToken,
@@ -243,6 +244,8 @@ async function handleApi(request, env, url) {
     const input = await body(request);
     const claim = await readBridgeToken(env, input.token);
     if (!claim) throw new HttpError(401, "This Composer handoff is not valid or has expired", "unauthorized");
+    if (!(await claimHandoff(env, claim)))
+      throw new HttpError(409, "This Composer handoff was already used. Reopen the studio from Composer.", "handoff_replayed");
     const token = await createSession(env, {
       mode: "bridge",
       actor: claim.actor,
@@ -1022,6 +1025,11 @@ async function handlePublic(request, env, url) {
     if (!claim)
       return new Response(loginPage({ next: "/", revision: BUILD.revision, bridged: Boolean(env.BRIDGE_SECRET), composerOrigin: env.COMPOSER_ORIGIN, storyUrl: env.PUBLIC_STORY_URL }), {
         status: 401,
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      });
+    if (!(await claimHandoff(env, claim)))
+      return new Response(loginPage({ next: "/", revision: BUILD.revision, bridged: Boolean(env.BRIDGE_SECRET), composerOrigin: env.COMPOSER_ORIGIN, storyUrl: env.PUBLIC_STORY_URL }), {
+        status: 409,
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
       });
     const session = await createSession(env, {

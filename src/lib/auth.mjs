@@ -129,6 +129,28 @@ export async function readBridgeToken(env, token) {
   }
 }
 
+/** Record a handoff's jti before a session is minted. Returns false when the
+ * same handoff was already consumed. */
+export async function claimHandoff(env, claim) {
+  const jti = typeof claim?.jti === "string" ? claim.jti.slice(0, 90) : "";
+  if (!jti) return false;
+  const timestamp = now();
+  try {
+    await env.DB.prepare(
+      "INSERT INTO bridge_handoffs(jti,expires,created_at) VALUES(?1,?2,?3)",
+    )
+      .bind(jti, claim.exp, timestamp)
+      .run();
+  } catch {
+    return false;
+  }
+  await env.DB.prepare("DELETE FROM bridge_handoffs WHERE expires < ?1")
+    .bind(timestamp)
+    .run()
+    .catch(() => {});
+  return true;
+}
+
 export function allowedActions(session) {
   return session?.mode === "owner" ? [...ACTIONS] : normaliseActions(session?.actions);
 }
@@ -141,7 +163,7 @@ export function can(session, action) {
  * action, so revoking a grant takes effect at the next dispatch even when the
  * browser still holds a studio session. Standalone owner sessions do not call
  * Composer and remain independent. */
-export async function verifyComposerGrant(env, session) {
+export async function verifyComposerGrant(env, session, action = "read") {
   if (session.mode === "owner") return true;
   const origin = typeof env.COMPOSER_ORIGIN === "string" ? env.COMPOSER_ORIGIN : "";
   const secret = env.BRIDGE_SECRET;
@@ -193,10 +215,10 @@ export async function verifyComposerGrant(env, session) {
       "forbidden",
     );
   const current = normaliseActions(payload.actions);
-  if (!current.includes("read"))
+  if (!current.includes("read") || !current.includes(action))
     throw new HttpError(
       403,
-      "This studio grant was revoked. Reopen the studio from App Composer if access is restored.",
+      `This studio's current grant no longer includes ${action}. Reopen the studio from App Composer if access is restored.`,
       "forbidden",
     );
   return true;
@@ -212,7 +234,7 @@ export async function requireSession(env, request, action = "read") {
       `This studio session does not include the ${action} permission.`,
       "forbidden",
     );
-  if (PRIVILEGED.has(action)) await verifyComposerGrant(env, session);
+  if (PRIVILEGED.has(action)) await verifyComposerGrant(env, session, action);
   return session;
 }
 
