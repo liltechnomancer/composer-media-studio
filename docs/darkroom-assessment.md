@@ -41,7 +41,7 @@ The 0.5.12 package could not admit the required route without modification:
    **Resolved upstream, not yet adopted here.** Fungi 0.35.0 lets a host inject
    its provider's own catalogue: `parseMediaCatalogue` decodes it and the
    `validate*` and cost functions take it as an argument. Darkroom version:
-   `0.6.0` (placeholder: confirm on npm before merging).
+   `0.7.0`.
 2. **Oyster-shaped references.** `MediaReference` requires
    `{ computerId, path }` and the request schema marks `computerId` as a string.
    This studio's references are app-owned R2 assets, which is exactly the
