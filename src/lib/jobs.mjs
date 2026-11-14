@@ -518,7 +518,7 @@ function sizeForBytes(mime, bytes) {
 }
 
 /** Advance one asynchronous job. Safe to call repeatedly from polling or cron. */
-export async function advanceGeneration(env, generation) {
+export async function advanceGeneration(env, generation, { allowDispatch = false } = {}) {
   const fresh = await loadGeneration(env, generation.id);
   if (fresh.deleted_at) {
     if (fresh.retained_key) await env.MEDIA.delete(fresh.retained_key);
@@ -545,6 +545,8 @@ export async function advanceGeneration(env, generation) {
   }
 
   if (fresh.status === "submitting") {
+    if (allowDispatch && RENDER_MODELS.has(fresh.model) && !fresh.submitted_at)
+      return dispatchDeferredRender(env, fresh);
     // A worker can die between the dispatch lease and the provider reply.
     // The provider may or may not have started: never resubmit automatically.
     if (now() - fresh.updated_at > 120_000) {
@@ -714,20 +716,15 @@ async function submitSocialCompose(env, generation, request, slateVideoAssetId) 
     }
     const tracks = [{ id: "visual", type: "video", keyframes }];
     tracks.push(...(await audioTracksForRender(env, generation.project_id, request, SLATE_MS)));
-    const nextRequest = {
-      ...request,
-      stage: "compose",
-      slateMs: SLATE_MS,
-      outputWidth: 720,
-      outputHeight: 1280,
-      totalMs: cursor,
-    };
+    // The slate is retained. Hand the job back to the scheduled renderer:
+    // clear the slate's provider identity so the next claim builds the
+    // compose tracks from this storyboard, not the slate video request.
     await env.DB.prepare(
-      "UPDATE generations SET request_json=?2,updated_at=?3,error_code=NULL,error_detail=NULL WHERE id=?1",
+      "UPDATE generations SET request_json=?2,status='submitting',provider_request_id=NULL,provider_status_url=NULL,provider_response_url=NULL,submitted_at=NULL,updated_at=?3,error_code=NULL,error_detail=NULL WHERE id=?1",
     )
-      .bind(generation.id, JSON.stringify(nextRequest), now())
+      .bind(generation.id, JSON.stringify({ ...request, stage: "compose", slateVideoAssetId }), now())
       .run();
-    return completeDirectRender(env, generation, model, tracks);
+    return loadGeneration(env, generation.id);
   } catch (error) {
     return failGeneration(env, generation, error, { dispatched: true });
   }
@@ -1171,6 +1168,71 @@ export async function createRender(env, project, composition, input) {
 }
 
 /** Submit the render. Exported so the worker can dispatch immediately. */
+/** Build the exact ordered track list for a bounded render. Signed links are
+ * created when the render actually starts, not when the request was admitted. */
+async function buildRenderTracks(env, generation, request) {
+  const model = getModel(generation.model);
+  const SLATE_MS = 1000;
+  const keyframes = [];
+  let cursor = 0;
+  let slateUrl = null;
+  if (model.render === "social") {
+    const slate = await loadAssetRow(env, generation.project_id, request.slateVideoAssetId);
+    if (!slate) throw new HttpError(409, "The saved 9:16 slate is no longer in this project", "slate_unavailable");
+    slateUrl = await signRenderLink(env, { assetId: slate.id, projectId: generation.project_id });
+    keyframes.push({ timestamp: 0, duration: SLATE_MS, url: slateUrl });
+    cursor = SLATE_MS;
+  }
+  for (const shot of request.shots ?? []) {
+    const asset = await loadAssetRow(env, generation.project_id, shot.assetId);
+    if (!asset) throw new HttpError(409, "A selected shot is no longer in this project", "shot_unavailable");
+    keyframes.push({
+      timestamp: cursor,
+      duration: Number(shot.durationMs),
+      url: await signRenderLink(env, { assetId: asset.id, projectId: generation.project_id }),
+    });
+    cursor += Number(shot.durationMs);
+  }
+  const tracks = [{ id: "visual", type: "video", keyframes }];
+  tracks.push(...(await audioTracksForRender(env, generation.project_id, request, model.render === "social" ? SLATE_MS : 0)));
+  return { tracks, totalMs: cursor, slateMs: model.render === "social" ? SLATE_MS : 0 };
+}
+
+const RENDER_MODELS = new Set(["studio-assembly", "studio-social"]);
+
+/** One claim per submitted render. The scheduled worker has minutes, so a
+ * cold compose does not die with the browser request. Browser polling never
+ * passes allowDispatch, so it cannot start a second paid request. */
+async function dispatchDeferredRender(env, generation) {
+  const fresh = await loadGeneration(env, generation.id);
+  if (fresh.status !== "submitting" || fresh.submitted_at) return fresh;
+  const claim = await env.DB.prepare(
+    "UPDATE generations SET submitted_at=?2, updated_at=?2 WHERE id=?1 AND status='submitting' AND submitted_at IS NULL",
+  )
+    .bind(fresh.id, now())
+    .run();
+  if (!claim?.meta?.changes && !claim?.changes) return loadGeneration(env, fresh.id);
+  const request = safeJson(fresh.request_json, {});
+  try {
+    const model = getModel(fresh.model);
+    const built = await buildRenderTracks(env, fresh, request);
+    const nextRequest = {
+      ...request,
+      stage: "compose",
+      totalMs: built.totalMs,
+      ...(model.render === "social"
+        ? { slateMs: built.slateMs, outputWidth: 720, outputHeight: 1280 }
+        : {}),
+    };
+    await env.DB.prepare("UPDATE generations SET request_json=?2,updated_at=?3 WHERE id=?1")
+      .bind(fresh.id, JSON.stringify(nextRequest), now())
+      .run();
+    return completeDirectRender(env, { ...fresh, request_json: JSON.stringify(nextRequest) }, model, built.tracks);
+  } catch (error) {
+    return failGeneration(env, fresh, error, { dispatched: true });
+  }
+}
+
 /** Complete a bounded render whose result arrived in the direct response.
  * Persist lineage and provider identity, download into owned storage, then
  * save. A download failure keeps the reservation and the provider result URL
@@ -1247,9 +1309,10 @@ export async function dispatchRender(env, generation) {
       return loadGeneration(env, generation.id);
     }
 
-    const tracks = [{ id: "visual", type: "video", keyframes }];
-    tracks.push(...(await audioTracksForRender(env, generation.project_id, request)));
-    return completeDirectRender(env, generation, model, tracks);
+    // The bounded direct render runs in the scheduled worker, which has a
+    // longer wall-clock budget than the interactive request. Persist the
+    // intent here; the claim and result live in advanceGeneration.
+    return loadGeneration(env, generation.id);
   } catch (error) {
     return failGeneration(env, generation, error, { dispatched: true });
   }

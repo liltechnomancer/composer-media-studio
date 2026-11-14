@@ -1148,7 +1148,8 @@ export default {
     ctx.waitUntil(
       (async () => {
         const pending = await pendingGenerations(env, 8);
-        for (const generation of pending) await advanceGeneration(env, generation);
+        for (const generation of pending)
+          await advanceGeneration(env, generation, { allowDispatch: true });
       })(),
     );
   },

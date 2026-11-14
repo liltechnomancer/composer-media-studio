@@ -150,13 +150,16 @@ test("a bounded render completes from the direct response without a queue result
             headers: { "content-type": "video/mp4" },
           }),
     async () => {
-      const first = await dispatchRender(envFor(env), job);
-      const second = await dispatchRender(envFor(env), first);
-      return { first, second };
+      const admitted = await dispatchRender(envFor(env), job);
+      const first = await advanceGeneration(envFor(env), admitted, { allowDispatch: true });
+      const second = await advanceGeneration(envFor(env), first, { allowDispatch: true });
+      return { admitted, first, second };
     },
   );
+  assert.equal(value.admitted.status, "submitting");
   assert.equal(value.first.status, "saved");
   assert.equal(value.second.status, "saved");
+  // One paid render for two crons and two polls.
   assert.equal(calls.filter((call) => call.url.startsWith("https://fal.run/")).length, 1);
   assert.ok(calls.every((call) => !call.url.startsWith("https://queue.fal.run/")));
 });
