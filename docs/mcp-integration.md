@@ -6,12 +6,12 @@ For a supported Codex CLI, substitute your own installation origin and run:
 
 ```sh
 codex mcp add media-studio --url https://your-studio.example/mcp
-codex mcp login media-studio
+codex mcp login media-studio --scopes studio.read
 ```
 
-The login opens the browser consent flow. Do not put access tokens or passphrases in a prompt, repository or shell command. Other clients need Streamable HTTP, OAuth authorization-code/PKCE support and a loopback redirect; their actual compatibility must be checked separately.
+The add command may immediately start an OAuth flow requesting every advertised scope; cancel that flow if you want read-only access, then run the explicit login command above. The login opens the browser consent flow. Do not put access tokens or passphrases in a prompt, repository or shell command. Other clients need Streamable HTTP, OAuth authorization-code/PKCE support and a loopback redirect; their actual compatibility must be checked separately.
 
-The initial scope is `studio.read`. When you need more, request only the additional scopes you intend to grant, for example `codex mcp login media-studio --scopes studio.read,studio.edit,studio.generate`. The browser lists the requested actions before consent. `studio.publish` is separate.
+For read-only access explicitly request `studio.read`. When you need more, request only the additional scopes you intend to grant, for example `codex mcp login media-studio --scopes studio.read,studio.edit,studio.generate`. The browser lists the requested actions before consent. `studio.publish` is separate.
 
 The OAuth 2.1 authorization-code flow requires PKCE S256, a registered loopback HTTP callback, and the exact MCP resource URL. Only public clients are supported. The token and authorization code are random, stored as hashes, and bound to a client, project, resource and issuer. Codes are single-use. Studio checks the current Composer grant on each bridged-token request, including reads; a standalone owner connection uses its own Studio authority. Responses use no-store; credentials do not appear in the connection list. Agent credentials are separate from browser cookies, owner passphrases and provider keys. Registration rate limiting stores a keyed IP digest, not the address; the existing scheduler prunes expired rate limits, codes and tokens, and removes client registrations after 90 days of inactivity once no live code or token remains.
 
