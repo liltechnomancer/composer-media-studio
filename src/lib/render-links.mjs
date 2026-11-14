@@ -22,7 +22,12 @@ async function hmac(secret, payload) {
 }
 
 function originFor(env) {
-  const origin = String(env.PUBLIC_ORIGIN ?? "").replace(/\/$/, "");
+  // RENDER_ORIGIN is for provider fetches only. The custom domain can sit
+  // behind edge bot/access rules that a server-side fetcher cannot satisfy;
+  // the workers.dev hostname reaches the same Worker and the same signature
+  // check without weakening the public address.
+  const configured = String(env.RENDER_ORIGIN ?? "").trim();
+  const origin = String(configured || env.PUBLIC_ORIGIN || "").replace(/\/$/, "");
   if (!origin.startsWith("https://"))
     throw new HttpError(503, "This studio does not know its public address", "not_configured");
   return origin;

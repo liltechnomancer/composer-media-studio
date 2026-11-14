@@ -236,6 +236,17 @@ test("trim, gain and fades need a saved mix instead of being silently ignored", 
   assert.equal(spec.audioTracks[0].fadeOutMs, 800);
 });
 
+test("render links use the provider-readable origin when one is configured", async () => {
+  const { env } = await setup();
+  const link = await signRenderLink(
+    { ...env, RENDER_ORIGIN: "https://studio-worker.example.workers.dev" },
+    { assetId: "asset_clip01", projectId: "prj_test" },
+  );
+  assert.equal(new URL(link).origin, "https://studio-worker.example.workers.dev");
+  // The public address is unchanged for everything else.
+  assert.equal(new URL(await signRenderLink(env, { assetId: "asset_clip01", projectId: "prj_test" })).origin, "https://studio.test");
+});
+
 test("render links are short-lived and bound to one asset and project", async () => {
   const { env } = await setup();
   const link = await signRenderLink(env, { assetId: "asset_clip01", projectId: "prj_test" });

@@ -40,6 +40,10 @@
   },
   "vars": {
     "PUBLIC_ORIGIN": "https://media.loftwah.com",
+    // Signed render inputs are fetched by the render provider, not a browser.
+    // The workers.dev hostname avoids edge bot/access rules on the custom
+    // domain while staying the same Worker and signature check.
+    "RENDER_ORIGIN": "https://composer-media-studio.loftwah.workers.dev",
     "COMPOSER_ORIGIN": "https://composer.loftwah.com",
     "MONTHLY_ALLOWANCE_MICRO": "5000000",
     "PUBLIC_BUILD_URL": "https://composer.loftwah.com/init?start=media-studio",
