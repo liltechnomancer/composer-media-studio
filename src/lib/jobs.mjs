@@ -1055,7 +1055,8 @@ export async function createRender(env, project, composition, input) {
       );
   }
 
-  const cost = model.costMicro;
+  // A saved slate video is reused, so only the final compose is charged.
+  const cost = model.render === "social" && spec.slateVideoAssetId ? 20_000 : model.costMicro;
   const generationId = id("gen");
   const timestamp = now();
   try {
