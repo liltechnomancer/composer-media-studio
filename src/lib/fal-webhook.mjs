@@ -116,7 +116,12 @@ export async function handleFalWebhook(request, env) {
     if (ok) await completeFromWebhook(env, generation, delivery?.payload ?? null);
     else
       await failFromWebhook(env, generation, {
-        detail: delivery?.error ?? delivery?.payload?.detail ?? "The provider reported a failed job",
+        // fal's own sentence and the model's payload detail are both useful:
+        // the first names the stage, the second names the rejected input.
+        detail: [delivery?.error, delivery?.payload?.detail]
+          .map((value) => (value === undefined || value === null ? "" : typeof value === "string" ? value : JSON.stringify(value)))
+          .filter(Boolean)
+          .join(" — "),
         errorType: delivery?.payload?.error_type ?? null,
       });
   } catch (error) {

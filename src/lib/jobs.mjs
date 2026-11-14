@@ -937,7 +937,7 @@ export async function completeFromWebhook(env, generation, payload) {
 /** A webhook ERROR is the provider's terminal answer. Keep the reservation:
  * a failed execution may still be billed, and nothing here proves a refund. */
 export async function failFromWebhook(env, generation, { detail, errorType } = {}) {
-  const message = `Provider finished with an error${errorType ? ` (${errorType})` : ""}: ${String(detail ?? "").slice(0, 200)}`;
+  const message = `Provider finished with an error${errorType ? ` (${errorType})` : ""}: ${String(detail ?? "").slice(0, 240)}`;
   const error = new HttpError(
     502,
     message,
