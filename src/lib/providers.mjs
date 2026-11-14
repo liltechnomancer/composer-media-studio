@@ -221,12 +221,12 @@ export const models = {
     kind: "video",
     render: "social",
     description:
-      "A true 1080 × 1920 cut of the same takes and audio bed. The selected shot order is preserved; the takes are fitted into a 9:16 frame rather than reordered.",
+      "A true 720 × 1280 cut of the same takes and audio bed. A generated one-second vertical slate opens the cut; the selected shot order is preserved and the takes are fitted into the 9:16 frame rather than reordered.",
     aspects: ["social"],
     references: 0,
-    costMicro: 40_000,
+    costMicro: 520_000,
     costBasis:
-      "Two bounded fal compose requests (a 9:16 slate, then the selected takes and sound); this flat figure is an estimate, not an invoice.",
+      "One Wan 2.5 720p vertical slate video (5 s at the published US$0.10/s, about US$0.50) plus one bounded compose with the selected takes and sound. The slate is saved and reused by later renders of the same storyboard; this is an estimate, not an invoice.",
   },
 };
 
@@ -621,6 +621,24 @@ export async function readImageResult(env, generation) {
  * the selected shot order. */
 export function orderShotsForSocial(shots) {
   return [...shots];
+}
+
+/** The 9:16 slate needs one real vertical video. Wan 2.5 accepts the
+ * deterministic slate as a data URI and returns an exact 720×1280 frame at
+ * this setting; compose then uses its first second as the opening card. */
+export async function submitSlateVideo(env, imageDataUri) {
+  return falSubmit(env, "fal-ai/wan-25-preview/image-to-video", {
+    prompt:
+      "A still opening title card with a very slow push in; keep the typography stable and unreadable text out of the way",
+    image_url: imageDataUri,
+    resolution: "720p",
+    duration: "5",
+    enable_prompt_expansion: false,
+  });
+}
+
+export async function readSlateResult(env, generation) {
+  return readVideoResult(env, generation);
 }
 
 /** Assemble ordered shots plus an optional audio bed in one bounded call. */

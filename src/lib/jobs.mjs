@@ -16,13 +16,16 @@ import {
   readAudioResult,
   readImageResult,
   readRenderResult,
+  readSlateResult,
   readVideoResult,
   readVideoStatus,
   runImage,
   submitAssembly,
   submitAudio,
   submitImageEdit,
+  submitSlateVideo,
   submitVideo,
+  toBase64,
   validateSettings,
   cancelVideo,
 } from "./providers.mjs";
@@ -574,16 +577,14 @@ function formatForMime(mime) {
   return "jpeg";
 }
 
-/** Stage one of the true 9:16 cut: compose a deliberate 1080×1920 slate, then
- * submit the selected takes in their chosen order after it. The slate makes the
- * output frame 9:16 without re-sorting the edit or stretching a 4:5 master. */
+/** Stage one of the true 9:16 cut: make one vertical slate video from the
+ * deterministic 1080×1920 still, keep those bytes as a reusable asset, then
+ * compose the selected takes in their chosen order after it. */
 async function completeSocialStage(env, generation, status) {
-  const model = getModel(generation.model);
   const request = safeJson(generation.request_json, {});
-  const SLATE_MS = 1000;
   let slate;
   try {
-    slate = await readRenderResult(env, {
+    slate = await readSlateResult(env, {
       ...generation,
       provider_response_url: status.responseUrl,
     });
@@ -596,30 +597,75 @@ async function completeSocialStage(env, generation, status) {
     return loadGeneration(env, generation.id);
   }
 
-  const keyframes = [{ timestamp: 0, duration: SLATE_MS, url: slate.url }];
-  let cursor = SLATE_MS;
-  for (const shot of request.shots ?? []) {
-    const asset = await loadAssetRow(env, generation.project_id, shot.assetId);
-    if (!asset) return failGeneration(env, generation, new HttpError(409, "A selected shot is no longer in this project", "shot_unavailable"), { dispatched: true });
-    keyframes.push({
-      timestamp: cursor,
-      duration: Number(shot.durationMs),
-      url: await signRenderLink(env, { assetId: asset.id, projectId: generation.project_id }),
-    });
-    cursor += Number(shot.durationMs);
-  }
-  const tracks = [{ id: "visual", type: "video", keyframes }];
-  tracks.push(...(await audioTracksForRender(env, generation.project_id, request, SLATE_MS)));
-
+  let stored;
   try {
+    const download = await downloadMedia(env, slate.url);
+    stored = await storeDerivedAsset(env, generation.project_id, {
+      bytes: download.bytes,
+      mime: download.contentType.includes("webm") ? "video/webm" : "video/mp4",
+      title: `9:16 slate video — ${request.title || "storyboard"}`.slice(0, 100),
+      caption: `Generated once from the deterministic 1080 × 1920 slate (fal-ai/wan-25-preview/image-to-video, 720p, 5 s). The studio uses its first second and reuses these bytes for later 9:16 renders.`,
+      source: "generated",
+    });
+  } catch (error) {
+    await env.DB.prepare(
+      "UPDATE generations SET error_code='slate_save_failed',error_detail=?2,updated_at=?3 WHERE id=?1",
+    )
+      .bind(generation.id, String(error.message ?? error).slice(0, 200), now())
+      .run();
+    return loadGeneration(env, generation.id);
+  }
+
+  if (request.compositionId) {
+    const composition = await env.DB.prepare("SELECT * FROM compositions WHERE id=?1 AND project_id=?2")
+      .bind(request.compositionId, generation.project_id)
+      .first();
+    if (composition) {
+      const spec = safeJson(composition.spec_json, {});
+      spec.slateVideoAssetId = stored.id;
+      await env.DB.prepare("UPDATE compositions SET spec_json=?2,updated_at=?3 WHERE id=?1")
+        .bind(composition.id, JSON.stringify(spec), now())
+        .run();
+    }
+  }
+
+  const nextRequest = { ...request, stage: "compose", slateVideoAssetId: stored.id };
+  return submitSocialCompose(env, generation, nextRequest, stored.id);
+}
+
+async function submitSocialCompose(env, generation, request, slateVideoAssetId) {
+  const model = getModel(generation.model);
+  const SLATE_MS = 1000;
+  try {
+    const slate = await loadAssetRow(env, generation.project_id, slateVideoAssetId);
+    if (!slate) throw new HttpError(409, "The saved 9:16 slate is no longer in this project", "slate_unavailable");
+    const keyframes = [
+      {
+        timestamp: 0,
+        duration: SLATE_MS,
+        url: await signRenderLink(env, { assetId: slate.id, projectId: generation.project_id }),
+      },
+    ];
+    let cursor = SLATE_MS;
+    for (const shot of request.shots ?? []) {
+      const asset = await loadAssetRow(env, generation.project_id, shot.assetId);
+      if (!asset) throw new HttpError(409, "A selected shot is no longer in this project", "shot_unavailable");
+      keyframes.push({
+        timestamp: cursor,
+        duration: Number(shot.durationMs),
+        url: await signRenderLink(env, { assetId: asset.id, projectId: generation.project_id }),
+      });
+      cursor += Number(shot.durationMs);
+    }
+    const tracks = [{ id: "visual", type: "video", keyframes }];
+    tracks.push(...(await audioTracksForRender(env, generation.project_id, request, SLATE_MS)));
     const submitted = await submitAssembly(env, model, tracks);
     const nextRequest = {
       ...request,
       stage: "compose",
-      slateVideoUrl: slate.url,
       slateMs: SLATE_MS,
-      outputWidth: 1080,
-      outputHeight: 1920,
+      outputWidth: 720,
+      outputHeight: 1280,
       totalMs: cursor,
     };
     await env.DB.prepare(
@@ -638,6 +684,43 @@ async function completeSocialStage(env, generation, status) {
   } catch (error) {
     return failGeneration(env, generation, error, { dispatched: true });
   }
+}
+
+/** Save an intermediate or retained result as a normal owned asset. */
+async function storeDerivedAsset(env, projectId, { bytes, mime, title, caption, source = "generated", parentAssetId = null }) {
+  const hash = await sha256Hex(bytes);
+  const assetId = id("asset");
+  const extension = extensionFor(mime);
+  const key = `projects/${projectId}/assets/${assetId}/original.${extension}`;
+  await env.MEDIA.put(key, bytes, { httpMetadata: { contentType: mime } });
+  const kind = kindForMime(mime);
+  const size = sizeForBytes(mime, bytes);
+  const timestamp = now();
+  await env.DB.prepare(
+    `INSERT INTO assets(id,project_id,kind,r2_key,mime,bytes,width,height,duration_ms,sample_rate,channels,sha256,title,caption,source,parent_asset_id,created_at,updated_at)
+     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?17)`,
+  )
+    .bind(
+      assetId,
+      projectId,
+      kind,
+      key,
+      mime,
+      bytes.length,
+      size.width ?? null,
+      size.height ?? null,
+      size.durationMs ?? null,
+      size.sampleRate ?? null,
+      size.channels ?? null,
+      hash,
+      title,
+      caption,
+      source,
+      parentAssetId,
+      timestamp,
+    )
+    .run();
+  return env.DB.prepare("SELECT * FROM assets WHERE id=?1").bind(assetId).first();
 }
 
 async function audioTracksForRender(env, projectId, request, offsetMs = 0) {
@@ -901,8 +984,15 @@ export async function buildCompositionSpec(env, project, input) {
       throw new HttpError(400, "The 9:16 slate must be a saved still in this project", "invalid_slate");
     slateAssetId = slate.id;
   }
+  let slateVideoAssetId = null;
+  if (input.slateVideoAssetId) {
+    const slateVideo = await loadAssetRow(env, project.id, String(input.slateVideoAssetId));
+    if (!slateVideo || slateVideo.kind !== "video")
+      throw new HttpError(400, "The 9:16 slate video must be a saved clip in this project", "invalid_slate");
+    slateVideoAssetId = slateVideo.id;
+  }
 
-  return { title, shots: manifest, audioAssetId, audioTracks, slateAssetId, totalMs };
+  return { title, shots: manifest, audioAssetId, audioTracks, slateAssetId, slateVideoAssetId, totalMs };
 }
 
 export async function createComposition(env, project, input) {
@@ -987,6 +1077,7 @@ export async function createRender(env, project, composition, input) {
           audioAssetId: spec.audioAssetId ?? null,
           audioTracks: spec.audioTracks ?? [],
           slateAssetId: spec.slateAssetId ?? null,
+          slateVideoAssetId: spec.slateVideoAssetId ?? null,
           totalMs: spec.totalMs,
           variant: model.render,
           stage: model.render === "social" ? "slate" : "compose",
@@ -1053,20 +1144,18 @@ export async function dispatchRender(env, generation) {
     }
 
     if (model.render === "social") {
+      if (request.slateVideoAssetId) {
+        const fresh = { ...generation, request_json: JSON.stringify({ ...request, stage: "compose" }) };
+        return submitSocialCompose(env, fresh, { ...request, stage: "compose" }, request.slateVideoAssetId);
+      }
       const slate = await loadAssetRow(env, generation.project_id, request.slateAssetId);
       if (!slate || slate.kind !== "image")
         throw new HttpError(409, "The 9:16 slate is no longer in this project", "slate_unavailable");
-      const slateUrl = await signRenderLink(env, {
-        assetId: slate.id,
-        projectId: generation.project_id,
-      });
-      const submitted = await submitAssembly(env, model, [
-        {
-          id: "visual",
-          type: "image",
-          keyframes: [{ timestamp: 0, duration: 1000, url: slateUrl }],
-        },
-      ]);
+      const object = await env.MEDIA.get(slate.r2_key);
+      if (!object) throw new HttpError(410, "The 9:16 slate bytes are unavailable", "slate_unavailable");
+      const bytes = new Uint8Array(await object.arrayBuffer());
+      const dataUri = `data:${slate.mime};base64,${toBase64(bytes)}`;
+      const submitted = await submitSlateVideo(env, dataUri);
       await env.DB.prepare(
         "UPDATE generations SET status='submitted',provider_request_id=?2,provider_status_url=?3,provider_response_url=?4,submitted_at=?5,updated_at=?5 WHERE id=?1 AND status='submitting'",
       )
