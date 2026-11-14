@@ -63,10 +63,20 @@ test("Share browsing and imports preserve source boundaries and deduplicate conc
   assert.deepEqual(results.map((response) => response.status).sort(), [200, 201]);
   const saved = await Promise.all(results.map((response) => response.json()));
   assert.equal(saved[0].asset.id, saved[1].asset.id);
+  assert.equal(saved[0].asset.reuseStillId, saved[0].asset.id);
+  assert.equal(saved[1].asset.reuseStillId, saved[1].asset.id);
+  assert.equal(env.MEDIA.objects.size, 1);
+  const upload = new FormData();
+  upload.set('file', new File([PNG_1x1], 'direct.png', { type: 'image/png' }));
+  const uploaded = await worker.fetch(new Request(`https://studio.test/api/projects/${project.id}/assets`, {
+    method: 'POST', headers: { cookie }, body: upload,
+  }), env);
+  assert.equal(uploaded.status, 201);
+  const direct = await uploaded.json();
+  assert.equal(direct.asset.reuseStillId, direct.asset.id);
   assert.equal(saved[0].asset.source, "upload");
   assert.equal(saved[0].asset.sha256, hash);
   assert.match(saved[0].asset.caption, /first-print\n.*source\.txt\nWoodhouse/);
-  assert.equal(env.MEDIA.objects.size, 1);
 
   asset.original.url = "https://other.example/source.png";
   assert.equal((await submit(payload)).status, 422);

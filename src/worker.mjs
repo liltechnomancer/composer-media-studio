@@ -146,6 +146,9 @@ function assetView(asset, extra = {}) {
     channels: asset.channels ?? null,
     sha256: asset.sha256,
     source: asset.source,
+    // The immediate upload/import response must carry the same self-reference
+    // as a fresh project read. Video relationships are supplied by that read.
+    reuseStillId: reuseStillFor({ asset, assets: [asset] })?.id ?? null,
     parentAssetId: asset.parent_asset_id,
     generationId: asset.generation_id,
     createdAt: asset.created_at,
