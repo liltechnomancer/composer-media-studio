@@ -686,16 +686,23 @@ async function completeSocialStage(env, generation, status) {
       .bind(request.compositionId, generation.project_id)
       .first();
     if (composition) {
-      const spec = safeJson(composition.spec_json, {});
-      spec.slateVideoAssetId = stored.id;
-      await env.DB.prepare("UPDATE compositions SET spec_json=?2,updated_at=?3 WHERE id=?1")
-        .bind(composition.id, JSON.stringify(spec), now())
-        .run();
+      await cacheSlateOnComposition(env, composition, stored.id);
     }
   }
 
   const nextRequest = { ...request, stage: "compose", slateVideoAssetId: stored.id };
   return submitSocialCompose(env, generation, nextRequest, stored.id);
+}
+
+// Caching the reusable slate is optional. Never replace a storyboard edit that
+// landed after this job read it; the job still retains its own slate asset.
+export async function cacheSlateOnComposition(env, composition, slateVideoAssetId) {
+  const spec = safeJson(composition.spec_json, {});
+  spec.slateVideoAssetId = slateVideoAssetId;
+  const updated = await env.DB.prepare("UPDATE compositions SET spec_json=?2,updated_at=?3 WHERE id=?1 AND project_id=?4 AND spec_json=?5 AND updated_at=?6 RETURNING id")
+    .bind(composition.id, JSON.stringify(spec), Math.max(now(), composition.updated_at + 1), composition.project_id, composition.spec_json, composition.updated_at)
+    .first();
+  return Boolean(updated);
 }
 
 async function submitSocialCompose(env, generation, request, slateVideoAssetId) {
@@ -1055,9 +1062,18 @@ export async function buildCompositionSpec(env, project, input) {
         `${asset.title || "That clip"} is not a bounded clip the studio can assemble`,
         "invalid_shots",
       );
+    const hasStart = Object.hasOwn(shot, "trimStartMs");
+    const hasEnd = Object.hasOwn(shot, "trimEndMs");
+    if (hasStart !== hasEnd)
+      throw new HttpError(400, "Provide both shot trim times, or neither for the whole clip", "invalid_shot_trim");
+    const start = hasStart ? shot.trimStartMs : 0;
+    const end = hasEnd ? shot.trimEndMs : durationMs;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end > durationMs || end <= start)
+      throw new HttpError(400, "Shot trim times must be whole milliseconds within the saved clip", "invalid_shot_trim");
+    const trimmed = start !== 0 || end !== durationMs;
     ids.push(assetId);
-    manifest.push({ assetId, title: asset.title || "Clip", durationMs });
-    totalMs += durationMs;
+    manifest.push({ assetId, title: asset.title || "Clip", durationMs: end - start, ...(trimmed ? { trimStartMs: start, trimEndMs: end } : {}) });
+    totalMs += end - start;
   }
   if (totalMs > MAX_TOTAL_MS)
     throw new HttpError(400, `Keep the assembled result under ${MAX_TOTAL_MS / 1000} seconds`, "invalid_shots");
@@ -1130,7 +1146,8 @@ export async function buildCompositionSpec(env, project, input) {
     slateVideoAssetId = slateVideo.id;
   }
 
-  return { title, shots: manifest, audioAssetId, audioTracks, slateAssetId, slateVideoAssetId, totalMs };
+  const trimVersioned = manifest.some(shot => Object.hasOwn(shot, "trimStartMs"));
+  return { title, shots: manifest, audioAssetId, audioTracks, slateAssetId, slateVideoAssetId, totalMs, ...(trimVersioned ? { trimVersioned: true } : {}) };
 }
 
 export async function createComposition(env, project, input) {
@@ -1161,18 +1178,26 @@ export async function createStoryboardFromSongPlan(env, project, planId, input) 
   if (!Array.isArray(song.scenes) || song.scenes.length < 2 || song.scenes.length > 6)
     throw new HttpError(400, "Choose two to six scenes", "invalid_shots");
   const shots = [];
+  const originScenes = [];
   for (const [index, scene] of song.scenes.entries()) {
     if (!scene.selectedTakeId) throw new HttpError(400, `Choose a saved take for scene ${index + 1} first`, "take_required");
     const take = await loadAssetRow(env, project.id, scene.selectedTakeId);
     if (!take || take.kind !== "video") throw new HttpError(400, `The take for scene ${index + 1} is unavailable`, "take_unavailable");
-    if (Number(take.duration_ms) !== scene.endMs - scene.startMs)
-      throw new HttpError(400, `Scene ${index + 1} is ${((scene.endMs - scene.startMs) / 1000).toFixed(3)}s but its take is ${(Number(take.duration_ms) / 1000).toFixed(3)}s. Adjust the scene or choose a matching take; this renderer cannot trim shots.`, "take_duration_mismatch");
-    shots.push({ assetId: take.id });
+    const sceneMs = scene.endMs - scene.startMs;
+    const takeMs = Number(take.duration_ms);
+    if (!Number.isSafeInteger(sceneMs) || sceneMs <= 0 || !Number.isSafeInteger(takeMs) || takeMs < sceneMs)
+      throw new HttpError(400, `Scene ${index + 1} needs a take at least as long as its timing. Choose a longer take or adjust the scene.`, "take_duration_mismatch");
+    const needsTrim = takeMs > sceneMs;
+    if (needsTrim && input.allowTrim !== true)
+      throw new HttpError(400, `Scene ${index + 1} has a longer take. Confirm using its first ${(sceneMs / 1000).toFixed(3)} seconds before making the storyboard.`, "take_trim_confirmation_required");
+    const trim = needsTrim ? { trimStartMs: 0, trimEndMs: sceneMs } : {};
+    shots.push({ assetId: take.id, ...trim });
+    originScenes.push({ id: scene.id, selectedTakeId: scene.selectedTakeId, startMs: scene.startMs, endMs: scene.endMs, ...trim });
   }
   const spec = await buildCompositionSpec(env, project, {
     title: song.title, shots, audioTracks: [{ assetId: source.id, role: "music", startMs: 0, trimStartMs: song.startMs, trimEndMs: song.endMs, gainDb: 0, fadeInMs: 0, fadeOutMs: 0 }],
   });
-  spec.originSongPlan = { id: plan.id, revision, songSha256: plan.song_sha256, sourceStartMs: song.startMs, sourceEndMs: song.endMs, scenes: song.scenes.map(scene => ({ id: scene.id, selectedTakeId: scene.selectedTakeId, startMs: scene.startMs, endMs: scene.endMs })) };
+  spec.originSongPlan = { id: plan.id, revision, songSha256: plan.song_sha256, sourceStartMs: song.startMs, sourceEndMs: song.endMs, scenes: originScenes };
   const compositionId = `cmp_song_${plan.id}_${revision}`;
   let existing = await env.DB.prepare("SELECT * FROM compositions WHERE id=?1 AND project_id=?2").bind(compositionId, project.id).first();
   if (existing) return { composition: { id: existing.id, projectId: existing.project_id, createdAt: existing.created_at, updatedAt: existing.updated_at, ...safeJson(existing.spec_json, {}) }, created: false };
@@ -1191,14 +1216,30 @@ export async function createStoryboardFromSongPlan(env, project, planId, input) 
 /** Editing keeps the composition id, so earlier renders still point at the cut
  * they were made from and the manifest is never rewritten retroactively. */
 export async function updateComposition(env, project, composition, input) {
+  const baseline = composition.spec_json === undefined
+    ? await env.DB.prepare("SELECT * FROM compositions WHERE id=?1 AND project_id=?2").bind(composition.id, project.id).first()
+    : composition;
+  if (!baseline) throw new HttpError(404, "Storyboard not found", "not_found");
+  const previous = safeJson(baseline.spec_json, {});
+  const requiresVersion = previous.trimVersioned === true || (previous.shots ?? []).some(shot => Object.hasOwn(shot, "trimStartMs") || Object.hasOwn(shot, "trimEndMs")) ||
+    (Array.isArray(input.shots) && input.shots.some(shot => shot && (Object.hasOwn(shot, "trimStartMs") || Object.hasOwn(shot, "trimEndMs"))));
+  if (requiresVersion && (!Number.isSafeInteger(input.expectedUpdatedAt) || input.expectedUpdatedAt !== baseline.updated_at))
+    throw new HttpError(409, "This storyboard changed or needs its saved version. Reload it before saving.", "revision_conflict");
+  for (const shot of previous.shots ?? []) {
+    const incoming = Array.isArray(input.shots) ? input.shots.find(item => item?.assetId === shot.assetId) : undefined;
+    if (incoming && (Object.hasOwn(shot, "trimStartMs") || Object.hasOwn(shot, "trimEndMs")) &&
+        (!Object.hasOwn(incoming, "trimStartMs") || !Object.hasOwn(incoming, "trimEndMs")))
+      throw new HttpError(400, "This storyboard has trimmed shots. Include both trim times when saving it.", "shot_trim_required");
+  }
   const spec = await buildCompositionSpec(env, project, input);
+  if (requiresVersion) spec.trimVersioned = true;
   // This is historical origin, not a claim that later edits still match the plan.
-  const originSongPlan = safeJson(composition.spec_json, {}).originSongPlan;
+  const originSongPlan = previous.originSongPlan;
   if (originSongPlan) spec.originSongPlan = originSongPlan;
-  await env.DB.prepare("UPDATE compositions SET title=?2,spec_json=?3,updated_at=?4 WHERE id=?1 AND project_id=?5")
-    .bind(composition.id, spec.title, JSON.stringify(spec), now(), project.id)
-    .run();
-  const fresh = await env.DB.prepare("SELECT * FROM compositions WHERE id=?1").bind(composition.id).first();
+  const fresh = await env.DB.prepare("UPDATE compositions SET title=?2,spec_json=?3,updated_at=?4 WHERE id=?1 AND project_id=?5 AND spec_json=?6 AND updated_at=?7 RETURNING *")
+    .bind(composition.id, spec.title, JSON.stringify(spec), Math.max(now(), baseline.updated_at + 1), project.id, baseline.spec_json, baseline.updated_at)
+    .first();
+  if (!fresh) throw new HttpError(409, "This storyboard changed. Reload it before saving.", "revision_conflict");
   return {
     id: fresh.id,
     projectId: fresh.project_id,
@@ -1218,6 +1259,9 @@ export async function createRender(env, project, composition, input) {
   if (!/^[a-zA-Z0-9_-]{8,80}$/.test(clientRequestId))
     throw new HttpError(400, "A client request id is required", "invalid_request");
 
+  const spec = safeJson(composition.spec_json, { shots: [], audioAssetId: null, audioTracks: [], totalMs: 0 });
+  if ((spec.shots ?? []).some(shot => Object.hasOwn(shot, "trimStartMs") || Object.hasOwn(shot, "trimEndMs")))
+    throw new HttpError(400, "Provider rendering does not support trimmed shots. Choose full clips for this render.", "provider_shot_trim_unsupported");
   const existing = await env.DB.prepare(
     "SELECT * FROM generations WHERE project_id=?1 AND client_request_id=?2",
   )
@@ -1225,7 +1269,6 @@ export async function createRender(env, project, composition, input) {
     .first();
   if (existing) return { generation: existing, created: false };
 
-  const spec = safeJson(composition.spec_json, { shots: [], audioAssetId: null, audioTracks: [], totalMs: 0 });
   let needsMix = (spec.audioTracks ?? []).some(
     (track) => track.trimStartMs || track.gainDb || track.fadeInMs || track.fadeOutMs || track.startMs,
   );
