@@ -62,3 +62,5 @@ The Apps launcher is the locally committed Composer distribution and source at A
 - The project export includes project, references, prompts, lineage, costs and publications but never secrets or media bytes. Media downloads are separate; an export is not an R2 backup.
 
 See [the reuse note](docs/darkroom-assessment.md) for the bounded Darkroom decision and [the deployment notes](docs/deployment.md).
+
+The [agent connection guide](docs/mcp-integration.md) describes the scoped MCP connection and its current limits.

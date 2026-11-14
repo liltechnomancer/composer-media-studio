@@ -2,6 +2,7 @@
 
 import {
   allowedActions,
+  can,
   checkLoginRate,
   claimHandoff,
   clearCookie,
@@ -29,13 +30,15 @@ import {
   reconcileGeneration,
   saveGeneration,
 } from "./lib/jobs.mjs";
-import { publicModels } from "./lib/providers.mjs";
+import { publicModels, getModel, validateSettings, estimateCost, PROVIDER_FAL, PROVIDER_CLOUDFLARE } from "./lib/providers.mjs";
 import { handleFalWebhook } from "./lib/fal-webhook.mjs";
 import { builtinRecipe, projectRecipes, renderPrompt, builtinRecipes } from "./lib/recipes.mjs";
 import { reuseStillFor, sharingDestinations } from "./lib/sharing.mjs";
 import { shareAsset, shareOriginal, sharePage, woodhouseUrl, shareApi, shareOrigin } from "./lib/woodhouse-share.mjs";
 import { shell, loginPage, publicPage, notFoundPage, helpPage, woodhouseGallery } from "./lib/ui.mjs";
 import { verifyRenderLink } from "./lib/render-links.mjs";
+import { createStudioMcpHandler } from "./mcp/tools.mjs";
+import { authorizeMcp, oauthRoute, pruneMcpRecords, reserveMcpSpend } from "./mcp/oauth.mjs";
 import {
   audioInfo,
   escapeHtml,
@@ -234,7 +237,7 @@ async function handleLogin(request, env) {
   });
 }
 
-async function handleApi(request, env, url, ctx) {
+async function handleApi(request, env, url, ctx, scopedAgent = null) {
   const path = url.pathname.replace(/\/+$/, "");
   const method = request.method;
 
@@ -308,8 +311,10 @@ async function handleApi(request, env, url, ctx) {
   if (/^\/api\/generations\/[a-z0-9_]+\/(cancel|reconcile|save-retry)$/.test(path)) action = "generate";
   if (/\/export$/.test(path)) action = "read";
 
-  const session = await requireSession(env, request, action);
-  if (session.mode === "bridge" && session.project && projectIdFromPath && session.project !== projectIdFromPath)
+  const session = scopedAgent ?? await requireSession(env, request, action);
+  if (scopedAgent && !can(session, action))
+    throw new HttpError(403, "This agent connection does not permit this action.", "forbidden");
+  if (session.mode !== "owner" && session.project && projectIdFromPath && session.project !== projectIdFromPath)
     throw new HttpError(
       403,
       "This studio session is scoped to another project. Reopen the project from App Composer.",
@@ -323,7 +328,7 @@ async function handleApi(request, env, url, ctx) {
 
   if (path === "/api/state" && method === "GET") {
     const { results } = await env.DB.prepare("SELECT * FROM projects ORDER BY updated_at DESC").all();
-    const visible = session.mode === "bridge" && session.project
+    const visible = session.mode !== "owner" && session.project
       ? results.filter((project) => project.id === session.project)
       : results;
     return json({
@@ -622,7 +627,7 @@ async function handleApi(request, env, url, ctx) {
     const [, assetId, action] = assetMatch;
     const asset = await env.DB.prepare("SELECT * FROM assets WHERE id=?1").bind(assetId).first();
     if (!asset) throw new HttpError(404, "Asset not found", "not_found");
-    if (session.mode === "bridge" && session.project && asset.project_id !== session.project)
+    if (session.mode !== "owner" && session.project && asset.project_id !== session.project)
       throw new HttpError(403, "This studio session is scoped to another project.", "forbidden");
 
     if (!action && method === "GET") return json({ asset: assetView(asset) });
@@ -735,7 +740,7 @@ async function handleApi(request, env, url, ctx) {
     if (typeof input.hidden !== "boolean") throw new HttpError(400, "Send hidden: true or false", "invalid");
     const row = await env.DB.prepare("SELECT id,project_id FROM publications WHERE id=?1 AND revoked_at IS NULL").bind(publicationMatch[1]).first();
     if (!row) throw new HttpError(404, "Publication not found", "not_found");
-    if (session.mode === "bridge" && session.project && row.project_id !== session.project)
+    if (session.mode !== "owner" && session.project && row.project_id !== session.project)
       throw new HttpError(403, "This studio session is scoped to another project.", "forbidden");
     await env.DB.prepare("UPDATE publications SET hidden=?2 WHERE id=?1").bind(row.id, input.hidden ? 1 : 0).run();
     return json({ id: row.id, hidden: input.hidden });
@@ -743,7 +748,7 @@ async function handleApi(request, env, url, ctx) {
   if (publicationMatch && method === "DELETE") {
     const row = await env.DB.prepare("SELECT id,project_id FROM publications WHERE id=?1").bind(publicationMatch[1]).first();
     if (!row) throw new HttpError(404, "Publication not found", "not_found");
-    if (session.mode === "bridge" && session.project && row.project_id !== session.project)
+    if (session.mode !== "owner" && session.project && row.project_id !== session.project)
       throw new HttpError(403, "This studio session is scoped to another project.", "forbidden");
     await env.DB.prepare("UPDATE publications SET revoked_at=?2 WHERE id=?1 AND revoked_at IS NULL")
       .bind(row.id, now())
@@ -755,10 +760,13 @@ async function handleApi(request, env, url, ctx) {
   if (generationMatch) {
     const [, generationId, action] = generationMatch;
     let generation = await loadGeneration(env, generationId);
-    if (session.mode === "bridge" && session.project && generation.project_id !== session.project)
+    if (session.mode !== "owner" && session.project && generation.project_id !== session.project)
       throw new HttpError(403, "This studio session is scoped to another project.", "forbidden");
     if (method === "GET" && !action) {
-      if (["submitted", "running", "provider_complete", "saving", "submitting"].includes(generation.status))
+      // The browser may advance a multi-stage render here. MCP read-only
+      // connections must only observe saved state: advancing a social render
+      // can submit its next paid provider stage.
+      if (!scopedAgent && ["submitted", "running", "provider_complete", "saving", "submitting"].includes(generation.status))
         generation = await advanceGeneration(env, generation);
       return json({
         generation: generationView(generation),
@@ -1218,6 +1226,91 @@ export default {
   async fetch(request, env, ctx) {
     try {
       const url = new URL(request.url);
+      if (url.pathname === '/mcp' || url.pathname.startsWith('/mcp/') || url.pathname.startsWith('/.well-known/oauth-')) {
+        const origin = env.PUBLIC_ORIGIN || url.origin;
+        const protect = (response) => {
+          const secured = securityHeaders(response);
+          const headers = new Headers(secured.headers);
+          const callbackOrigin = headers.get('x-studio-internal-callback-origin');
+          headers.delete('x-studio-internal-callback-origin');
+          headers.set('cache-control', 'no-store');
+          // Chrome sends Origin: null on a form POST from a no-referrer page.
+          // same-origin still suppresses referrers to the loopback client.
+          const formPage = request.method === 'GET' && (url.pathname === '/mcp/authorize' || url.pathname === '/mcp/connections');
+          headers.set('referrer-policy', formPage ? 'same-origin' : 'no-referrer');
+          if (formPage && url.pathname === '/mcp/authorize' && callbackOrigin) {
+            // OAuth validated the registered loopback URI before providing this
+            // internal header. Chrome checks form-action on the 303 as well.
+            headers.set('content-security-policy', headers.get('content-security-policy').replace("form-action 'self'", `form-action 'self' ${callbackOrigin}`));
+          }
+          return new Response(secured.body, { status: secured.status, headers });
+        };
+        if (url.origin !== origin || (request.headers.get('origin') && request.headers.get('origin') !== origin))
+          return protect(json({ error: 'Origin is not allowed' }, 403));
+        if (url.pathname === '/mcp') {
+          const session = await authorizeMcp(request, env);
+          if (!session) return protect(json({ error: 'Authentication required' }, 401, { 'www-authenticate': `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp", scope="studio.read"` }));
+          const quoteGeneration = async ({ projectId, body, maxCostMicro }) => {
+            const current = await authorizeMcp(request, env);
+            const refuse = (message) => { const error = new Error(message); error.publicMessage = message; throw error; };
+            if (!current || !can(current, 'generate') || current.project !== projectId) refuse('This connection cannot generate in that project.');
+            const project = await loadProject(env, projectId);
+            const model = getModel(body.model);
+            if (model.kind !== body.kind || model.render) refuse('Choose a supported generation model for this media type.');
+            if ((model.provider === PROVIDER_FAL && !env.FAL_KEY) || (model.provider === PROVIDER_CLOUDFLARE && !env.AI)) refuse('The required provider is not configured; nothing was submitted.');
+            const settings = validateSettings(model, body);
+            const costMicro = estimateCost(model, settings);
+            if (costMicro > maxCostMicro) refuse('The current estimate exceeds the requested maximum; nothing was submitted.');
+            if ((await budgetSnapshot(env, projectId)).availableMicro < costMicro) refuse('The project allowance is insufficient; nothing was submitted.');
+            return { costMicro, modelLabel: model.label, projectName: project.name };
+          };
+          const handler = createStudioMcpHandler(async ({ method, path, body, binaryRange, spend }) => {
+            const current = await authorizeMcp(request, env);
+            if (!current) return { status: 403, body: { error: { code: 'forbidden', message: 'The agent connection is no longer active.' } } };
+            const generationPath = /^\/api\/projects\/([a-z0-9_]+)\/generations$/.exec(path);
+            if (generationPath && method === 'POST') {
+              if (!spend || !Number.isSafeInteger(spend.quotedCostMicro)) return { status: 403, body: { error: { code: 'spend_authority_required', message: 'This request has no approved spending authority.' } } };
+              const quote = await quoteGeneration({ projectId: generationPath[1], body, maxCostMicro: spend.maxCostMicro });
+              if (quote.costMicro !== spend.quotedCostMicro) return { status: 409, body: { error: { code: 'estimate_changed', message: 'The estimate changed. Request a new confirmation.' } } };
+              const fingerprint = await sha256Hex(new TextEncoder().encode(JSON.stringify({ projectId: generationPath[1], body })));
+              if (!await reserveMcpSpend(env, current.agentTokenId, body.clientRequestId, fingerprint, quote.costMicro)) return { status: 403, body: { error: { code: 'connection_spend_exhausted', message: 'The connection spending limit is exhausted or this request ID was already used for different work.' } } };
+              if (!await authorizeMcp(request, env)) return { status: 403, body: { error: { code: 'forbidden', message: 'The agent connection is no longer active.' } } };
+              // The existing job table scopes idempotency to the whole project.
+              // Namespace MCP IDs by token to prevent a client from causing an
+              // unrelated admitted job to dispatch under its own cheaper quote.
+              const internalRequestId = await sha256Hex(new TextEncoder().encode(JSON.stringify([current.agentTokenId, body.clientRequestId])));
+              body = { ...body, clientRequestId: `mcp_${internalRequestId}` };
+            }
+            const headers = new Headers();
+            if (body !== undefined) headers.set('content-type', 'application/json');
+            if (binaryRange) headers.set('range', `bytes=${binaryRange.offset}-${binaryRange.offset + binaryRange.length - 1}`);
+            const internal = new Request(origin + path, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+            try {
+              const response = await handleApi(internal, env, new URL(internal.url), ctx, current);
+              if (binaryRange && response.status === 206) {
+                const range = response.headers.get('content-range')?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+                const bytes = new Uint8Array(await response.arrayBuffer());
+                if (!range || bytes.length > 49152) throw new Error('Invalid media range');
+                const nextOffset = Number(range[2]) + 1, totalBytes = Number(range[3]);
+                return { status: 206, body: { encoding: 'base64', mime: response.headers.get('content-type'), offset: Number(range[1]), nextOffset: nextOffset < totalBytes ? nextOffset : null, totalBytes, data: btoa(String.fromCharCode(...bytes)) } };
+              }
+              if (binaryRange && response.status === 416) return { status: 416, body: { error: { code: 'invalid_range', message: 'The offset is outside the asset.' } } };
+              return { status: response.status, body: await response.json() };
+            } catch (error) {
+              if (error instanceof HttpError) return { status: error.status, body: { error: { code: error.code, message: error.message } } };
+              throw error;
+            }
+          }, {
+            stateKey: env.SESSION_SECRET,
+            binding: await sha256Hex(new TextEncoder().encode(request.headers.get('authorization') || '')),
+            quote: quoteGeneration,
+          });
+          return protect(await handler.fetch(request));
+        }
+        const response = await oauthRoute(request, env, url);
+        if (response) return protect(response);
+        return protect(json({ error: 'Not found' }, 404));
+      }
       const response = url.pathname.startsWith("/api/")
         ? await handleApi(request, env, url, ctx)
         : await handlePublic(request, env, url);
@@ -1240,5 +1333,6 @@ export default {
         for (const generation of pending) await advanceGeneration(env, generation);
       })(),
     );
+    ctx.waitUntil(pruneMcpRecords(env));
   },
 };
