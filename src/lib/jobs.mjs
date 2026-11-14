@@ -21,6 +21,7 @@ import {
   readVideoResult,
   readVideoStatus,
   runImage,
+  runRenderDirect,
   submitAssembly,
   submitAudio,
   submitImageEdit,
@@ -713,7 +714,6 @@ async function submitSocialCompose(env, generation, request, slateVideoAssetId) 
     }
     const tracks = [{ id: "visual", type: "video", keyframes }];
     tracks.push(...(await audioTracksForRender(env, generation.project_id, request, SLATE_MS)));
-    const submitted = await submitAssembly(env, model, tracks);
     const nextRequest = {
       ...request,
       stage: "compose",
@@ -723,18 +723,11 @@ async function submitSocialCompose(env, generation, request, slateVideoAssetId) 
       totalMs: cursor,
     };
     await env.DB.prepare(
-      "UPDATE generations SET request_json=?2,status='submitted',provider_request_id=?3,provider_status_url=?4,provider_response_url=?5,submitted_at=?6,updated_at=?6,error_code=NULL,error_detail=NULL WHERE id=?1",
+      "UPDATE generations SET request_json=?2,updated_at=?3,error_code=NULL,error_detail=NULL WHERE id=?1",
     )
-      .bind(
-        generation.id,
-        JSON.stringify(nextRequest),
-        submitted.requestId,
-        submitted.statusUrl,
-        submitted.responseUrl,
-        now(),
-      )
+      .bind(generation.id, JSON.stringify(nextRequest), now())
       .run();
-    return loadGeneration(env, generation.id);
+    return completeDirectRender(env, generation, model, tracks);
   } catch (error) {
     return failGeneration(env, generation, error, { dispatched: true });
   }
@@ -1178,6 +1171,31 @@ export async function createRender(env, project, composition, input) {
 }
 
 /** Submit the render. Exported so the worker can dispatch immediately. */
+/** Complete a bounded render whose result arrived in the direct response.
+ * Persist lineage and provider identity, download into owned storage, then
+ * save. A download failure keeps the reservation and the provider result URL
+ * so a retry-save path can read the same bytes instead of rendering again. */
+async function completeDirectRender(env, generation, model, tracks) {
+  const result = await runRenderDirect(env, model, tracks);
+  await env.DB.prepare(
+    "UPDATE generations SET status='provider_complete',provider_request_id=COALESCE(?2,provider_request_id),updated_at=?3 WHERE id=?1",
+  )
+    .bind(generation.id, result.requestId ?? null, now())
+    .run();
+  let download;
+  try {
+    download = await downloadMedia(env, result.url);
+  } catch (error) {
+    await env.DB.prepare(
+      "UPDATE generations SET error_code='download_failed',error_detail=?2,updated_at=?3 WHERE id=?1",
+    )
+      .bind(generation.id, String(error.message ?? error).slice(0, 200), now())
+      .run();
+    return loadGeneration(env, generation.id);
+  }
+  return saveGeneration(env, generation, download.bytes, "mp4");
+}
+
 export async function dispatchRender(env, generation) {
   const model = getModel(generation.model);
   const request = safeJson(generation.request_json, {});
@@ -1231,13 +1249,7 @@ export async function dispatchRender(env, generation) {
 
     const tracks = [{ id: "visual", type: "video", keyframes }];
     tracks.push(...(await audioTracksForRender(env, generation.project_id, request)));
-    const submitted = await submitAssembly(env, model, tracks);
-    await env.DB.prepare(
-      "UPDATE generations SET status='submitted',provider_request_id=?2,provider_status_url=?3,provider_response_url=?4,submitted_at=?5,updated_at=?5 WHERE id=?1 AND status='submitting'",
-    )
-      .bind(generation.id, submitted.requestId, submitted.statusUrl, submitted.responseUrl, now())
-      .run();
-    return loadGeneration(env, generation.id);
+    return completeDirectRender(env, generation, model, tracks);
   } catch (error) {
     return failGeneration(env, generation, error, { dispatched: true });
   }

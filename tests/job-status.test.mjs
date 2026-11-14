@@ -3,8 +3,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { advanceGeneration, loadGeneration } from "../src/lib/jobs.mjs";
-import { setup } from "./harness.mjs";
+import { advanceGeneration, dispatchRender, loadGeneration } from "../src/lib/jobs.mjs";
+import { addAsset, setup } from "./harness.mjs";
 
 const STATUS_URL = "https://queue.fal.run/fal-ai/ffmpeg-api/requests/req_status/status";
 const RESULT_URL = "https://queue.fal.run/fal-ai/ffmpeg-api/requests/req_status";
@@ -114,4 +114,49 @@ test("a finished failure is not dispatched or read twice", async () => {
   );
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, `${STATUS_URL}?logs=1`);
+});
+
+test("a bounded render completes from the direct response without a queue result read", async () => {
+  const { env, project } = await setup();
+  await addAsset(env, project, { id: "asset_a", kind: "video", durationMs: 1000 });
+  await addAsset(env, project, { id: "asset_b", kind: "video", durationMs: 1000 });
+  const timestamp = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO generations(id,project_id,client_request_id,kind,recipe_id,provider,model,request_json,status,cost_estimate_micro,cost_reserved_micro,created_at,updated_at)
+     VALUES('gen_direct',?1,'req_direct','video','composition','fal','studio-assembly',?2,'admitted',20000,20000,?3,?3)`,
+  )
+    .bind(
+      project.id,
+      JSON.stringify({
+        title: "Direct render",
+        shots: [
+          { assetId: "asset_a", durationMs: 1000 },
+          { assetId: "asset_b", durationMs: 1000 },
+        ],
+      }),
+      timestamp,
+    )
+    .run();
+  const job = await loadGeneration(env, "gen_direct");
+  const { value, calls } = await withFetch(
+    (url) =>
+      url.startsWith("https://fal.run/")
+        ? new Response(
+            JSON.stringify({ video: { url: "https://v3.fal.media/files/out.mp4", content_type: "video/mp4" } }),
+            { status: 200, headers: { "x-fal-request-id": "req_direct_1" } },
+          )
+        : new Response(Uint8Array.from([0, 0, 0, 8, 0x66, 0x74, 0x79, 0x70]), {
+            status: 200,
+            headers: { "content-type": "video/mp4" },
+          }),
+    async () => {
+      const first = await dispatchRender(envFor(env), job);
+      const second = await dispatchRender(envFor(env), first);
+      return { first, second };
+    },
+  );
+  assert.equal(value.first.status, "saved");
+  assert.equal(value.second.status, "saved");
+  assert.equal(calls.filter((call) => call.url.startsWith("https://fal.run/")).length, 1);
+  assert.ok(calls.every((call) => !call.url.startsWith("https://queue.fal.run/")));
 });

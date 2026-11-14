@@ -7,6 +7,7 @@ import {
   classifyProviderFailure,
   getModel,
   readVideoStatus,
+  runRenderDirect,
   readVideoResult,
   sanitiseProviderDetail,
   submitVideo,
@@ -214,4 +215,43 @@ test("failure classification separates funding, permission and transient errors"
   assert.equal(classifyProviderFailure(429, {}), "provider_rate_limited");
   assert.equal(classifyProviderFailure(422, { detail: "invalid input" }), "provider_rejected");
   assert.equal(classifyProviderFailure(503, {}), "provider_error");
+});
+
+test("a direct render posts to fal.run and returns the inline result", async () => {
+  const model = getModel("studio-assembly");
+  const { value, calls } = await withFetch(
+    () =>
+      new Response(
+        JSON.stringify({ video: { url: "https://v3.fal.media/files/render.mp4", content_type: "video/mp4" } }),
+        { status: 200, headers: { "x-fal-request-id": "req_direct" } },
+      ),
+    () => runRenderDirect({ FAL_KEY: "k" }, model, [{ id: "visual", type: "video", keyframes: [] }]),
+  );
+  assert.equal(calls[0].url, "https://fal.run/fal-ai/ffmpeg-api/compose");
+  assert.equal(calls[0].options.headers.authorization, "Key k");
+  assert.match(calls[0].options.headers["x-fal-request-timeout"], /^\d+$/);
+  assert.equal(value.url, "https://v3.fal.media/files/render.mp4");
+  assert.equal(value.requestId, "req_direct");
+});
+
+test("a direct render permission refusal is definitive and keeps the provider type", async () => {
+  const model = getModel("studio-assembly");
+  await withFetch(
+    () =>
+      new Response(JSON.stringify({ detail: "You do not have permission to use this endpoint" }), {
+        status: 403,
+        headers: { "x-fal-error-type": "permission" },
+      }),
+    async () => {
+      await assert.rejects(
+        runRenderDirect({ FAL_KEY: "k" }, model, [{ id: "visual", type: "video", keyframes: [] }]),
+        (error) => {
+          assert.equal(error.code, "provider_permission");
+          assert.equal(error.providerStatus, 403);
+          assert.equal(error.definitive, true);
+          return true;
+        },
+      );
+    },
+  );
 });
