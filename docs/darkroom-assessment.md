@@ -38,17 +38,17 @@ The 0.5.12 package could not admit the required route without modification:
    installation. A custom `MediaProvider` is injectable, but
    `validateMediaGenerationSettings` rejects a model outside that catalogue, so
    the provider cannot be reached with a valid request.
-   **Resolved upstream, not yet adopted here.** Fungi 0.35.0 lets a host inject
-   its provider's own catalogue: `parseMediaCatalogue` decodes it and the
-   `validate*` and cost functions take it as an argument. Darkroom version:
-   `0.7.0`.
+   **Resolved upstream, not yet adopted here.** Darkroom 0.7.0 lets a host
+   inject its provider's own catalogue: `parseMediaCatalogue` decodes it, and
+   the `validate*` functions and the video cost estimate take it as an
+   argument.
 2. **Oyster-shaped references.** `MediaReference` requires
    `{ computerId, path }` and the request schema marks `computerId` as a string.
    This studio's references are app-owned R2 assets, which is exactly the
    independent Cloudflare path required when Oyster is absent.
-   **Still open** in the 0.35.0 source: the settings schema accepts an optional
-   `computerId`, but the resolved reference Darkroom stores and bounds-checks
-   still carries one.
+   **Still open** in Darkroom 0.7.0: the selection schema accepts an optional
+   `computerId`, but `MediaReference` and the validated settings still require
+   one.
 3. **Two engines, one outcome.** Using Darkroom for still images and a separate
    engine for video would create two job authorities for one studio and duplicate
    cancellation, budget and tombstone semantics. That is worse than one reviewed
@@ -75,7 +75,7 @@ This is a documented replacement of the machinery, not an unexamined one. The la
 Adopt Darkroom when either:
 
 - its references no longer need a Computer (incompatibility 2), now that its
-  catalogue is host-extensible (incompatibility 1, resolved in Fungi 0.35.0), or
+  catalogue is host-extensible (incompatibility 1, resolved in Darkroom 0.7.0), or
 - [#422](https://github.com/loftwah/app-composer/issues/422)'s Oyster path is
   enabled and its gateway video route is the selected provider.
 
