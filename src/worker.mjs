@@ -30,6 +30,7 @@ import {
   saveGeneration,
 } from "./lib/jobs.mjs";
 import { publicModels } from "./lib/providers.mjs";
+import { handleFalWebhook } from "./lib/fal-webhook.mjs";
 import { builtinRecipe, projectRecipes, renderPrompt, builtinRecipes } from "./lib/recipes.mjs";
 import { reuseStillFor, sharingDestinations } from "./lib/sharing.mjs";
 import { shell, loginPage, publicPage, notFoundPage, helpPage } from "./lib/ui.mjs";
@@ -269,6 +270,11 @@ async function handleApi(request, env, url) {
       { "set-cookie": sessionCookie(token, "bridge") },
     );
   }
+
+  // fal's completion webhook is unauthenticated by nature. The handler
+  // verifies fal's Ed25519 signature and can only update the job that already
+  // holds the delivered request id, so it sits before the session gate.
+  if (path === "/api/fal/webhook" && method === "POST") return handleFalWebhook(request, env);
 
   if (path === "/api/session") {
     const session = await readSession(env, request);

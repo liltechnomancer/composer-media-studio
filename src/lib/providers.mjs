@@ -444,6 +444,8 @@ export function classifyProviderFailure(status, { errorType, detail } = {}) {
     return "provider_funding";
   if (/permission|forbidden|not allowed|unauthori[sz]ed|access denied|not enabled|scope/.test(text))
     return "provider_permission";
+  if (/invalid|validation|unsupported|bad request|must (contain|be)|required/.test(text))
+    return "provider_rejected";
   if (status === 401) return "provider_auth";
   if (status === 402) return "provider_funding";
   if (status === 403) return "provider_permission";
@@ -500,6 +502,23 @@ async function readFalResult(env, generation, label) {
     throw error;
   }
   return response.json().catch(() => null);
+}
+
+/** fal's documented webhook URL for a finished queue request. Only a public
+ * HTTPS studio has one; local and standalone installs keep polling. */
+export function webhookUrl(env) {
+  const explicit = typeof env.FAL_WEBHOOK_URL === "string" ? env.FAL_WEBHOOK_URL.trim() : "";
+  if (explicit.startsWith("https://")) return explicit;
+  const origin = String(env.PUBLIC_ORIGIN ?? "").replace(/\/$/, "");
+  return origin.startsWith("https://") ? `${origin}/api/fal/webhook` : null;
+}
+
+function withWebhook(env, url) {
+  const target = webhookUrl(env);
+  if (!target) return url;
+  const parsed = new URL(url);
+  parsed.searchParams.set("fal_webhook", target);
+  return parsed.href;
 }
 
 export async function submitVideo(env, model, settings, reference) {
@@ -611,8 +630,9 @@ export async function cancelVideo(env, generation) {
 
 /** One place that submits to the fal queue, so audio and render jobs inherit
  * the same URL validation as video. */
-async function falSubmit(env, endpoint, input) {
-  const response = await fetch(`${FAL_ORIGIN}/${endpoint}`, {
+async function falSubmit(env, endpoint, input, { webhook = false } = {}) {
+  const target = `${FAL_ORIGIN}/${endpoint}`;
+  const response = await fetch(webhook ? withWebhook(env, target) : target, {
     method: "POST",
     headers: {
       authorization: `Key ${falKey(env)}`,
@@ -740,7 +760,10 @@ export async function readSlateResult(env, generation) {
 
 /** Assemble ordered shots plus an optional audio bed in one bounded call. */
 export async function submitAssembly(env, model, tracks) {
-  return falSubmit(env, model.endpoint, { tracks });
+  // A bounded render is the one queue request whose result the current key
+  // cannot read back. Ask fal to deliver the finished payload instead; the
+  // polling path still runs and is idempotent if the webhook arrives first.
+  return falSubmit(env, model.endpoint, { tracks }, { webhook: true });
 }
 
 export async function readRenderResult(env, generation) {

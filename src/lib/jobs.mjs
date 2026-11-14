@@ -355,7 +355,7 @@ async function recordProviderFailure(env, generation, error, stage) {
     .join(" · ")
     .slice(0, 240);
   await env.DB.prepare(
-    "UPDATE generations SET status=?2,error_code=?3,error_detail=?4,updated_at=?5 WHERE id=?1 AND status IN ('submitting','submitted','running','provider_complete','cancel_requested')",
+    "UPDATE generations SET status=?2,error_code=?3,error_detail=?4,updated_at=?5 WHERE id=?1 AND status IN ('submitting','submitted','running','provider_complete','unknown','cancel_requested')",
   )
     .bind(generation.id, terminal ? "failed" : "unknown", code, detail, now())
     .run();
@@ -869,6 +869,83 @@ async function completeJob(env, generation, status) {
             : "jpeg"
         : "mp4";
   return saveGeneration(env, generation, download.bytes, format);
+}
+
+function resultFileFor(model, payload) {
+  if (!payload) return null;
+  if (model.kind === "audio") return payload.audio ?? payload.audio_file ?? null;
+  if (model.kind === "image")
+    return payload.images?.[0] ?? payload.image ?? payload.mask_image ?? null;
+  return (
+    payload.video ??
+    (typeof payload.video_url === "string"
+      ? { url: payload.video_url, content_type: "video/mp4" }
+      : null)
+  );
+}
+
+function outputFormatFor(model, contentType) {
+  if (model.kind === "audio")
+    return contentType.includes("wav") ? "wav" : "mp3";
+  if (model.kind === "image")
+    return contentType.includes("png") ? "png" : contentType.includes("webp") ? "webp" : "jpeg";
+  return "mp4";
+}
+
+export async function loadGenerationByProviderRequest(env, requestId) {
+  return env.DB.prepare(
+    "SELECT * FROM generations WHERE provider_request_id=?1 ORDER BY created_at DESC LIMIT 1",
+  )
+    .bind(requestId)
+    .first();
+}
+
+/** fal delivers the finished payload to the verified webhook. Save it through
+ * the same owned-storage path as a polled result. Re-delivery is a no-op. */
+export async function completeFromWebhook(env, generation, payload) {
+  const fresh = await loadGeneration(env, generation.id);
+  if (!fresh || fresh.status === "saved" || fresh.deleted_at) return fresh;
+  const model = getModel(fresh.model);
+  const file = resultFileFor(model, payload);
+  if (!file?.url) {
+    await env.DB.prepare(
+      "UPDATE generations SET status='failed',error_code='provider_invalid',error_detail='The provider webhook carried no usable output',updated_at=?2 WHERE id=?1",
+    )
+      .bind(fresh.id, now())
+      .run();
+    return loadGeneration(env, fresh.id);
+  }
+  await env.DB.prepare(
+    "UPDATE generations SET status='provider_complete',updated_at=?2 WHERE id=?1",
+  )
+    .bind(fresh.id, now())
+    .run();
+  let download;
+  try {
+    download = await downloadMedia(env, file.url);
+  } catch (error) {
+    await env.DB.prepare(
+      "UPDATE generations SET error_code='download_failed',error_detail=?2,updated_at=?3 WHERE id=?1",
+    )
+      .bind(fresh.id, String(error.message ?? error).slice(0, 200), now())
+      .run();
+    return loadGeneration(env, fresh.id);
+  }
+  return saveGeneration(env, fresh, download.bytes, outputFormatFor(model, download.contentType));
+}
+
+/** A webhook ERROR is the provider's terminal answer. Keep the reservation:
+ * a failed execution may still be billed, and nothing here proves a refund. */
+export async function failFromWebhook(env, generation, { detail, errorType } = {}) {
+  const message = `Provider finished with an error${errorType ? ` (${errorType})` : ""}: ${String(detail ?? "").slice(0, 200)}`;
+  const error = new HttpError(
+    502,
+    message,
+    classifyProviderFailure(502, { errorType, detail }),
+  );
+  error.providerStatus = 200;
+  error.errorType = errorType ?? null;
+  return recordProviderFailure(env, generation, error, "execution");
 }
 
 async function loadAssetRow(env, projectId, assetId) {
